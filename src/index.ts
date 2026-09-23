@@ -74,7 +74,7 @@ function createServer() {
 
         const result: any = await response.json();
 
-        if (result.status?.error_code) {
+    if (Number(result.status?.error_code ?? 0) !== 0) {
           return {
             content: [
               {
