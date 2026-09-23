@@ -1,9 +1,10 @@
+import { env } from "cloudflare:workers";
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 
 const CMC_URL =
-  "https://pro-api.coinmarketcap.com/public-api/v3/cryptocurrency/listings/latest?start=1&limit=300&convert=USD";
+  "https://pro-api.coinmarketcap.com/v3/cryptocurrency/listings/latest?start=1&limit=300&convert=USD";
 
 function createServer() {
   const server = new McpServer({
@@ -20,9 +21,30 @@ function createServer() {
     },
     async () => {
       try {
+        const apiKey = (
+          env as unknown as Record<string, string>
+        ).CMC_API_KEY;
+
+        if (!apiKey) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  ok: false,
+                  source: "CoinMarketCap",
+                  error: "CMC_API_KEY is not configured on the Worker",
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+
         const response = await fetch(CMC_URL, {
           headers: {
             Accept: "application/json",
+            "X-CMC_PRO_API_KEY": apiKey,
           },
           cf: {
             cacheEverything: true,
@@ -52,6 +74,27 @@ function createServer() {
 
         const result: any = await response.json();
 
+        if (result.status?.error_code) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    ok: false,
+                    source: "CoinMarketCap",
+                    cmc_error_code: result.status.error_code,
+                    cmc_error_message: result.status.error_message,
+                  },
+                  null,
+                  2,
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
+
         const coins = Array.isArray(result.data)
           ? result.data
           : [];
@@ -72,28 +115,17 @@ function createServer() {
             name: coin.name,
             symbol: coin.symbol,
             slug: coin.slug,
-
-            price_usd:
-              usd?.price ?? null,
-
-            market_cap_usd:
-              usd?.market_cap ?? null,
-
-            volume_24h_usd:
-              usd?.volume_24h ?? null,
-
+            price_usd: usd?.price ?? null,
+            market_cap_usd: usd?.market_cap ?? null,
+            volume_24h_usd: usd?.volume_24h ?? null,
             volume_change_24h:
               usd?.volume_change_24h ?? null,
-
             percent_change_1h:
               usd?.percent_change_1h ?? null,
-
             percent_change_24h:
               usd?.percent_change_24h ?? null,
-
             percent_change_7d:
               usd?.percent_change_7d ?? null,
-
             last_updated:
               usd?.last_updated ??
               coin.last_updated ??
@@ -103,12 +135,8 @@ function createServer() {
 
         const ranks = normalized
           .map((coin: any) => coin.rank)
-          .filter((rank: any) =>
-            Number.isInteger(rank),
-          )
-          .sort(
-            (a: number, b: number) => a - b,
-          );
+          .filter((rank: any) => Number.isInteger(rank))
+          .sort((a: number, b: number) => a - b);
 
         const complete =
           normalized.length === 300 &&
@@ -127,16 +155,12 @@ function createServer() {
                   ok: true,
                   source: "CoinMarketCap",
                   retrieved: normalized.length,
-                  first_rank:
-                    ranks[0] ?? null,
+                  first_rank: ranks[0] ?? null,
                   last_rank:
-                    ranks[ranks.length - 1] ??
-                    null,
-                  ranks_1_to_300_complete:
-                    complete,
+                    ranks[ranks.length - 1] ?? null,
+                  ranks_1_to_300_complete: complete,
                   timestamp:
-                    result.status?.timestamp ??
-                    null,
+                    result.status?.timestamp ?? null,
                   coins: normalized,
                 },
                 null,
@@ -175,9 +199,9 @@ const handler = createMcpHandler(createServer);
 export default {
   fetch(
     request: Request,
-    env: Env,
+    workerEnv: Env,
     ctx: ExecutionContext,
   ) {
-    return handler(request, env, ctx);
+    return handler(request, workerEnv, ctx);
   },
 } satisfies ExportedHandler<Env>;
