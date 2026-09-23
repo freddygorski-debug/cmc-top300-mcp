@@ -15,7 +15,7 @@ function createServer() {
     "get_cmc_top_300",
     {
       description:
-        "Retrieve the current CoinMarketCap Top 300 cryptocurrencies, ranked from 1 to 300, for market scanning and analysis.",
+        "Retrieve the current CoinMarketCap Top 300 cryptocurrencies with price, momentum, volume and market data for Neverless 2% scanning.",
       inputSchema: z.object({}),
     },
     async () => {
@@ -51,11 +51,19 @@ function createServer() {
         }
 
         const result: any = await response.json();
-        const coins = Array.isArray(result.data) ? result.data : [];
+
+        const coins = Array.isArray(result.data)
+          ? result.data
+          : [];
 
         const normalized = coins.map((coin: any) => {
           const usd = Array.isArray(coin.quote)
-            ? coin.quote.find((item: any) => item.symbol === "USD")
+            ? coin.quote.find(
+                (item: any) =>
+                  item?.symbol === "USD" ||
+                  item?.currency === "USD" ||
+                  item?.name === "USD",
+              ) ?? coin.quote[0]
             : coin.quote?.USD;
 
           return {
@@ -64,24 +72,51 @@ function createServer() {
             name: coin.name,
             symbol: coin.symbol,
             slug: coin.slug,
-            price_usd: usd?.price ?? null,
-            market_cap_usd: usd?.market_cap ?? null,
-            volume_24h_usd: usd?.volume_24h ?? null,
-            percent_change_1h: usd?.percent_change_1h ?? null,
-            percent_change_24h: usd?.percent_change_24h ?? null,
-            percent_change_7d: usd?.percent_change_7d ?? null,
+
+            price_usd:
+              usd?.price ?? null,
+
+            market_cap_usd:
+              usd?.market_cap ?? null,
+
+            volume_24h_usd:
+              usd?.volume_24h ?? null,
+
+            volume_change_24h:
+              usd?.volume_change_24h ?? null,
+
+            percent_change_1h:
+              usd?.percent_change_1h ?? null,
+
+            percent_change_24h:
+              usd?.percent_change_24h ?? null,
+
+            percent_change_7d:
+              usd?.percent_change_7d ?? null,
+
+            last_updated:
+              usd?.last_updated ??
+              coin.last_updated ??
+              null,
           };
         });
 
         const ranks = normalized
           .map((coin: any) => coin.rank)
-          .filter((rank: any) => Number.isInteger(rank))
-          .sort((a: number, b: number) => a - b);
+          .filter((rank: any) =>
+            Number.isInteger(rank),
+          )
+          .sort(
+            (a: number, b: number) => a - b,
+          );
 
         const complete =
           normalized.length === 300 &&
           ranks.length === 300 &&
-          ranks.every((rank: number, index: number) => rank === index + 1);
+          ranks.every(
+            (rank: number, index: number) =>
+              rank === index + 1,
+          );
 
         return {
           content: [
@@ -92,10 +127,16 @@ function createServer() {
                   ok: true,
                   source: "CoinMarketCap",
                   retrieved: normalized.length,
-                  first_rank: ranks[0] ?? null,
-                  last_rank: ranks[ranks.length - 1] ?? null,
-                  ranks_1_to_300_complete: complete,
-                  timestamp: result.status?.timestamp ?? null,
+                  first_rank:
+                    ranks[0] ?? null,
+                  last_rank:
+                    ranks[ranks.length - 1] ??
+                    null,
+                  ranks_1_to_300_complete:
+                    complete,
+                  timestamp:
+                    result.status?.timestamp ??
+                    null,
                   coins: normalized,
                 },
                 null,
@@ -132,7 +173,11 @@ function createServer() {
 const handler = createMcpHandler(createServer);
 
 export default {
-  fetch(request: Request, env: Env, ctx: ExecutionContext) {
+  fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+  ) {
     return handler(request, env, ctx);
   },
 } satisfies ExportedHandler<Env>;
