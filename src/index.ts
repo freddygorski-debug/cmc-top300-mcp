@@ -53,22 +53,25 @@ function createServer() {
         const result: any = await response.json();
         const coins = Array.isArray(result.data) ? result.data : [];
 
-        const normalized = coins.map((coin: any) => ({
-          rank: coin.cmc_rank,
-          id: coin.id,
-          name: coin.name,
-          symbol: coin.symbol,
-          slug: coin.slug,
-          price_usd: coin.quote?.USD?.price ?? null,
-          market_cap_usd: coin.quote?.USD?.market_cap ?? null,
-          volume_24h_usd: coin.quote?.USD?.volume_24h ?? null,
-          percent_change_1h:
-            coin.quote?.USD?.percent_change_1h ?? null,
-          percent_change_24h:
-            coin.quote?.USD?.percent_change_24h ?? null,
-          percent_change_7d:
-            coin.quote?.USD?.percent_change_7d ?? null,
-        }));
+        const normalized = coins.map((coin: any) => {
+          const usd = Array.isArray(coin.quote)
+            ? coin.quote.find((item: any) => item.symbol === "USD")
+            : coin.quote?.USD;
+
+          return {
+            rank: coin.cmc_rank,
+            id: coin.id,
+            name: coin.name,
+            symbol: coin.symbol,
+            slug: coin.slug,
+            price_usd: usd?.price ?? null,
+            market_cap_usd: usd?.market_cap ?? null,
+            volume_24h_usd: usd?.volume_24h ?? null,
+            percent_change_1h: usd?.percent_change_1h ?? null,
+            percent_change_24h: usd?.percent_change_24h ?? null,
+            percent_change_7d: usd?.percent_change_7d ?? null,
+          };
+        });
 
         const ranks = normalized
           .map((coin: any) => coin.rank)
