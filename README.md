@@ -1,5 +1,28 @@
 # Building a Remote MCP Server on Cloudflare (Without Auth)
 
+## Private Telegram alerts
+
+`POST /telegram/alert` requires `Authorization: Bearer <TELEGRAM_TEST_SECRET>`
+(existing secret, at least 32 characters) and `Content-Type: application/json`.
+It uses the existing Telegram token and chat ID; no new secrets are required.
+Unlike `/telegram/test`, alerts do not depend on `TELEGRAM_TEST_ENABLED` and
+send immediately after authentication and validation.
+
+All seven fields are required. Text fields must be nonempty single-line strings:
+`symbol` (32 characters), `status` (80), `signal` (160), `reason` (1000).
+`price`, `take_profit`, and `stop_loss` accept a finite nonnegative number or
+a nonempty single-line string (64 characters, e.g. `102 USD`). Unknown fields
+are rejected. The body is limited to 8192 bytes, even without Content-Length.
+
+Success returns HTTP 200 with `{ "ok": true, "sent": true }`. Failures return
+`ok: false, sent: false`: 400 invalid payload, 401 unauthorized, 405 wrong method,
+413 body too large, 415 wrong content type, 503 missing configuration, or
+502 Telegram failure. Responses are not cached and do not include upstream errors.
+The public CMC tools and `/telegram/test` disabled/dry-run/send behavior are retained.
+
+Run `npm test`, `npm run type-check`, and `npx wrangler deploy --dry-run`
+to validate locally without sending Telegram messages or deploying.
+
 This example allows you to deploy a stateless remote MCP server that doesn't require authentication on Cloudflare Workers. It implements the MCP 2026-07-28 specification while remaining compatible with legacy clients for ordinary tool calls.
 
 ## Get started:
