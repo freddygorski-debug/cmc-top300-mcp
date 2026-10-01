@@ -68,20 +68,12 @@ async function telegramTest(request: Request, workerEnv: TelegramEnv): Promise<R
     Response.json(data, { status, headers: { "Cache-Control": "no-store" } });
   if (workerEnv.TELEGRAM_TEST_ENABLED !== "true") return reply(404, { ok: false });
   if (request.method !== "POST") return reply(405, { ok: false });
-  const secret = workerEnv.TELEGRAM_TEST_SECRET;
-  if (!secret || secret.length < 32) return reply(503, { ok: false, error: "Test authentication not configured" });
-  const authorization = request.headers.get("Authorization") ?? "";
-  if (authorization.length > 1024) return reply(401, { ok: false });
-  const encoder = new TextEncoder();
-  const [expected, supplied] = await Promise.all([
-    crypto.subtle.digest("SHA-256", encoder.encode(`Bearer ${secret}`)),
-    crypto.subtle.digest("SHA-256", encoder.encode(authorization)),
-  ]);
-  const a = new Uint8Array(expected);
-  const b = new Uint8Array(supplied);
-  let difference = 0;
-  for (let i = 0; i < a.length; i++) difference |= a[i] ^ b[i];
-  if (difference !== 0) return reply(401, { ok: false });
+  if (!workerEnv.TELEGRAM_TEST_SECRET || workerEnv.TELEGRAM_TEST_SECRET.length < 32) {
+    return reply(503, { ok: false, error: "Test authentication not configured" });
+  }
+  if (!await telegramAuthorized(request, workerEnv)) {
+    return reply(401, { ok: false });
+  }
   const chatId = workerEnv.TELEGRAM_CHAT_ID?.trim();
   if (!workerEnv.TELEGRAM_BOT_TOKEN || !chatId || !/^-?\d+$/.test(chatId)) {
     return reply(503, { ok: false, error: "Telegram configuration incomplete" });
@@ -91,6 +83,84 @@ async function telegramTest(request: Request, workerEnv: TelegramEnv): Promise<R
     return reply(200, { ok: true, dry_run: true, sent: false });
   }
   const sent = await sendTelegram(workerEnv, "Test cmc-top300-mcp : connexion Telegram opérationnelle.");
+  return reply(sent ? 200 : 502, { ok: sent, sent });
+}
+
+async function telegramAuthorized(request: Request, workerEnv: TelegramEnv): Promise<boolean> {
+  const secret = workerEnv.TELEGRAM_TEST_SECRET;
+  if (!secret || secret.length < 32) return false;
+  const authorization = request.headers.get("Authorization") ?? "";
+  if (authorization.length > 1024) return false;
+  const encoder = new TextEncoder();
+  const [expected, supplied] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(`Bearer ${secret}`)),
+    crypto.subtle.digest("SHA-256", encoder.encode(authorization)),
+  ]);
+  const a = new Uint8Array(expected);
+  const b = new Uint8Array(supplied);
+  let difference = 0;
+  for (let i = 0; i < a.length; i++) difference |= a[i] ^ b[i];
+  return difference === 0;
+}
+
+const alertText = (max: number) => z.string().max(max).trim().min(1)
+  .refine(value => !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(value));
+const alertValue = z.union([alertText(64), z.number().finite().nonnegative()]);
+const telegramAlertSchema = z.object({
+  symbol: alertText(32),
+  status: alertText(80),
+  price: alertValue,
+  signal: alertText(160),
+  take_profit: alertValue,
+  stop_loss: alertValue,
+  reason: alertText(1000),
+}).strict();
+
+async function telegramAlert(request: Request, workerEnv: TelegramEnv): Promise<Response> {
+  const reply = (status: number, data: Record<string, unknown>) =>
+    Response.json({ ok: false, sent: false, ...data }, {
+      status, headers: { "Cache-Control": "no-store", ...(status === 405 ? { Allow: "POST" } : {}) },
+    });
+  if (request.method !== "POST") return reply(405, {});
+  if (!workerEnv.TELEGRAM_TEST_SECRET || workerEnv.TELEGRAM_TEST_SECRET.length < 32) return reply(503, {});
+  if (!await telegramAuthorized(request, workerEnv)) return reply(401, {});
+  if (request.headers.get("Content-Type")?.split(";")[0].trim().toLowerCase() !== "application/json") return reply(415, {});
+  // Bound actual streamed bytes, including requests without Content-Length.
+  const reader = request.body?.getReader();
+  if (!reader) return reply(400, {});
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  let data: unknown;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 8192) {
+        await reader.cancel();
+        return reply(413, {});
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    data = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes));
+  } catch {
+    return reply(400, {});
+  } finally {
+    reader.releaseLock();
+  }
+  const parsed = telegramAlertSchema.safeParse(data);
+  if (!parsed.success) return reply(400, { error: "Invalid alert payload" });
+  const chatId = workerEnv.TELEGRAM_CHAT_ID?.trim();
+  if (!workerEnv.TELEGRAM_BOT_TOKEN || !chatId || !/^-?\d+$/.test(chatId)) return reply(503, {});
+  const alert = parsed.data;
+  const sent = await sendTelegram(workerEnv, [
+    "🚨 ALERTE CRYPTO", "", `Crypto : ${alert.symbol}`, `Statut : ${alert.status}`,
+    `Prix : ${alert.price}`, `Signal : ${alert.signal}`, `TP : ${alert.take_profit}`,
+    `SL : ${alert.stop_loss}`, `Motif : ${alert.reason}`,
+  ].join("\n"));
   return reply(sent ? 200 : 502, { ok: sent, sent });
 }
 
@@ -484,6 +554,9 @@ export default {
     workerEnv: Env,
     ctx: ExecutionContext,
   ) {
+    if (new URL(request.url).pathname === "/telegram/alert") {
+      return telegramAlert(request, workerEnv as unknown as TelegramEnv);
+    }
     if (new URL(request.url).pathname === "/telegram/test") {
       return telegramTest(request, workerEnv as unknown as TelegramEnv);
     }
