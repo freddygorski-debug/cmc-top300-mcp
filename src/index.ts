@@ -32,6 +32,68 @@ function errorContent(data: any) {
   };
 }
 
+// Telegram stays separate from the public, read-only CMC MCP tools.
+type TelegramEnv = {
+  TELEGRAM_BOT_TOKEN?: string;
+  TELEGRAM_CHAT_ID?: string;
+  TELEGRAM_TEST_SECRET?: string;
+  TELEGRAM_TEST_ENABLED?: string;
+};
+
+async function sendTelegram(workerEnv: TelegramEnv, text: string): Promise<boolean> {
+  const token = workerEnv.TELEGRAM_BOT_TOKEN;
+  const chatId = workerEnv.TELEGRAM_CHAT_ID?.trim();
+  if (!token || !chatId || !/^-?\d+$/.test(chatId)) return false;
+  try {
+    const response = await fetch(
+      `https://api.telegram.org/bot${token}/sendMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, text }),
+        signal: AbortSignal.timeout(10000),
+      },
+    );
+    if (!response.ok) return false;
+    const result = await response.json() as { ok?: boolean };
+    return result.ok === true;
+  } catch {
+    // Never log the exception: its URL could contain the bot token.
+    return false;
+  }
+}
+
+async function telegramTest(request: Request, workerEnv: TelegramEnv): Promise<Response> {
+  const reply = (status: number, data: Record<string, unknown>) =>
+    Response.json(data, { status, headers: { "Cache-Control": "no-store" } });
+  if (workerEnv.TELEGRAM_TEST_ENABLED !== "true") return reply(404, { ok: false });
+  if (request.method !== "POST") return reply(405, { ok: false });
+  const secret = workerEnv.TELEGRAM_TEST_SECRET;
+  if (!secret || secret.length < 32) return reply(503, { ok: false, error: "Test authentication not configured" });
+  const authorization = request.headers.get("Authorization") ?? "";
+  if (authorization.length > 1024) return reply(401, { ok: false });
+  const encoder = new TextEncoder();
+  const [expected, supplied] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(`Bearer ${secret}`)),
+    crypto.subtle.digest("SHA-256", encoder.encode(authorization)),
+  ]);
+  const a = new Uint8Array(expected);
+  const b = new Uint8Array(supplied);
+  let difference = 0;
+  for (let i = 0; i < a.length; i++) difference |= a[i] ^ b[i];
+  if (difference !== 0) return reply(401, { ok: false });
+  const chatId = workerEnv.TELEGRAM_CHAT_ID?.trim();
+  if (!workerEnv.TELEGRAM_BOT_TOKEN || !chatId || !/^-?\d+$/.test(chatId)) {
+    return reply(503, { ok: false, error: "Telegram configuration incomplete" });
+  }
+  // Validation only by default. Sending requires the explicit send=1 flag.
+  if (new URL(request.url).searchParams.get("send") !== "1") {
+    return reply(200, { ok: true, dry_run: true, sent: false });
+  }
+  const sent = await sendTelegram(workerEnv, "Test cmc-top300-mcp : connexion Telegram opérationnelle.");
+  return reply(sent ? 200 : 502, { ok: sent, sent });
+}
+
 function createServer() {
   const server = new McpServer({
     name: "CoinMarketCap Top 300 + Intraday",
@@ -422,6 +484,9 @@ export default {
     workerEnv: Env,
     ctx: ExecutionContext,
   ) {
+    if (new URL(request.url).pathname === "/telegram/test") {
+      return telegramTest(request, workerEnv as unknown as TelegramEnv);
+    }
     return handler(request, workerEnv, ctx);
   },
 } satisfies ExportedHandler<Env>;
