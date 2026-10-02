@@ -9,6 +9,10 @@
 	"compatibility_date": "2026-07-02",
 	"compatibility_flags": ["nodejs_compat"],
 	"previews": {},
+	"keep_vars": true,
+	"triggers": { "crons": ["*/15 * * * *"] },
+	"durable_objects": { "bindings": [{ "name": "OBSERVATION_SCANNER", "class_name": "ObservationScanner" }] },
+	"migrations": [{ "tag": "observation-v1", "new_sqlite_classes": ["ObservationScanner"] }],
 	"observability": {
 		"enabled": true,
 	},
