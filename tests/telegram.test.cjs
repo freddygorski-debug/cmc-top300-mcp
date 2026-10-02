@@ -7,12 +7,12 @@ const { z } = require('zod');
 
 // Run the actual Worker routes with only the Cloudflare/MCP imports stubbed.
 function setup() {
-  const source = fs.readFileSync('src/index.ts', 'utf8').replace(/^import .*;\r?\n/gm, '');
+  const source = (fs.readFileSync('src/telegram.ts', 'utf8') + '\n' + fs.readFileSync('src/index.ts', 'utf8')).replace(/^import .*;\r?\n/gm, '');
   const calls = [];
   const tools = [];
   let telegramResponse = Response.json({ ok: true });
   const context = {
-    exports: {}, z, env: {}, Request, Response, URL, TextEncoder, TextDecoder,
+    ObservationScanner: class {}, exports: {}, z, env: {}, Request, Response, URL, TextEncoder, TextDecoder,
     Uint8Array, AbortSignal, crypto: globalThis.crypto,
     McpServer: class { registerTool(name) { tools.push(name); } },
     createMcpHandler: create => { create(); return () => Response.json({ mcp: true }); },
