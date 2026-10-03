@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const ts = require('typescript');
 function setup(enabled = true) {
   const now = Math.floor(Date.now() / 900000) * 900000;
-  const storage = new Map(); const calls = []; const messages = [];
+  const storage = new Map(); const calls = []; const messages = []; const logs = [];
   const prices = [10, 8, 11, 10, 9, 11, 10, 12, 13];
   const points = prices.map((price, i) => ({ timestamp: new Date(now - (8-i)*900000).toISOString(), price }));
   const ctx = { storage: { get: async key => storage.get(key), put: async (key, value) => {
@@ -14,13 +14,15 @@ function setup(enabled = true) {
   const env = { AUTO_SCAN_ENABLED: enabled ? 'true' : undefined, CMC_API_KEY: 'fake', TELEGRAM_BOT_TOKEN: 'fake', TELEGRAM_CHAT_ID: '1' };
   const listing = { id: 1, symbol: 'BTC', cmc_rank: 1, tags: [], quote: { USD: { price: 13, percent_change_1h: 2, volume_change_24h: 20, volume_24h: 10000000, last_updated: new Date(now).toISOString() } } };
   const context = { exports: {}, Date, AbortSignal, Number, Object, Error, Promise,
+    console: { log: text => logs.push(JSON.parse(text)) },
     DurableObject: class { constructor(ctx, env) { this.ctx = ctx; this.env = env; } },
     sendTelegram: async (env, text) => { messages.push(text); return true; },
     fetch: async url => { calls.push(url); return { ok: true, json: async () => ({ status: {error_code:0}, data: url.includes('listings') ? [listing] : { 1: { id: 1, quotes: points.map(x => ({ timestamp:x.timestamp, quote:{USD:{price:x.price}} })) } } }) }; },
   };
   const source = fs.readFileSync('src/observation.ts','utf8').replace(/^import .*;\r?\n/gm,'');
   vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,context);
-  return { ...context.exports, scanner: new context.exports.ObservationScanner(ctx, env), now, storage, calls, messages, points, listing,
+  return { ...context.exports, scanner: new context.exports.ObservationScanner(ctx, env), now, storage, calls, messages, points, listing, logs,
+    setFetch: fetch => { context.fetch = fetch; }, setSignal: signal => { context.AbortSignal = { timeout: () => signal }; },
     restart: () => new context.exports.ObservationScanner(ctx, env), failSend: () => { context.sendTelegram = async () => false; } };
 }
 test('confirmation requires two rising intervals, higher trough, freshness and continuous timestamps', () => {
@@ -49,5 +51,34 @@ test('daily attempt cap, cooldown after restart and uncertain delivery remain pe
   const s=setup(); const slot=Math.floor(s.now/900000); s.failSend(); await s.scanner.run(slot);
   assert.equal(s.storage.get('daily').count,1); assert.ok(s.storage.get('last:1'));
   await s.restart().run(slot+1); assert.equal(s.storage.get('daily').count,1);
+});
+
+test('diagnostics distinguish no candidates and confirmed or uncertain Telegram delivery', async () => {
+  const empty=setup(); empty.listing.tags=['stablecoin']; await empty.scanner.run(Math.floor(empty.now/900000));
+  assert.equal(empty.storage.get('status').outcome,'no_candidates');
+  const good=setup(); await good.scanner.run(Math.floor(good.now/900000));
+  assert.equal(good.storage.get('status').sent,1); assert.equal(good.storage.get('status').outcome,'sent');
+  const bad=setup(); bad.failSend(); await bad.scanner.run(Math.floor(bad.now/900000));
+  assert.equal(bad.storage.get('status').sent,0); assert.equal(bad.storage.get('status').ok,false);
+  assert.equal(bad.storage.get('status').outcome,'delivery_unconfirmed');
+});
+
+test('failed data requests record stage and controlled codes without leaking error text', async () => {
+  for (const kind of ['timeout','network','http','api','invalid_response']) {
+    const s=setup(); s.setSignal({aborted:kind==='timeout'});
+    s.setFetch(async () => {
+      if (kind==='timeout' || kind==='network') throw new Error('SECRET_UPSTREAM_URL_AND_TOKEN');
+      if (kind==='http') return {ok:false,status:429};
+      if (kind==='invalid_response') return {ok:true,json:async()=>{throw new Error('SECRET_RESPONSE');}};
+      return {ok:true,json:async()=>({status:{error_code:1006,error_message:'SECRET_RESPONSE'}})};
+    });
+    await s.scanner.run(Math.floor(s.now/900000));
+    const status=s.storage.get('status');
+    assert.equal(status.ok,false); assert.equal(status.stage,'listings'); assert.equal(status.kind,kind);
+    if (kind==='http') assert.equal(status.code,429);
+    if (kind==='api') assert.equal(status.code,1006);
+    assert.equal(JSON.stringify(s.logs).includes('SECRET'),false);
+    assert.equal(s.messages.length,0);
+  }
 });
 
