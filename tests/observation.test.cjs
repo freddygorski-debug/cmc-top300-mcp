@@ -22,6 +22,7 @@ function setup(enabled = true) {
   const source = fs.readFileSync('src/observation.ts','utf8').replace(/^import .*;\r?\n/gm,'');
   vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,context);
   return { ...context.exports, scanner: new context.exports.ObservationScanner(ctx, env), now, storage, calls, messages, points, listing, logs,
+    mapResponse: transform => { const original = context.fetch; context.fetch = async url => { const response = await original(url); const body = await response.json(); return { ...response, json: async () => transform(body) }; }; },
     setFetch: fetch => { context.fetch = fetch; }, setSignal: signal => { context.AbortSignal = { timeout: () => signal }; },
     restart: () => new context.exports.ObservationScanner(ctx, env), failSend: () => { context.sendTelegram = async () => false; } };
 }
@@ -80,5 +81,28 @@ test('failed data requests record stage and controlled codes without leaking err
     assert.equal(JSON.stringify(s.logs).includes('SECRET'),false);
     assert.equal(s.messages.length,0);
   }
+});
+
+test('CMC status compatibility accepts numeric/string zero and absent status with valid data', async () => {
+  for (const shape of ['numeric','string','absent']) {
+    const s=setup(); s.mapResponse(body => {
+      if (shape==='string') body.status.error_code='0';
+      if (shape==='absent') delete body.status;
+      return body;
+    });
+    await s.scanner.run(Math.floor(s.now/900000));
+    assert.equal(s.messages.length,1); assert.equal(s.storage.get('status').outcome,'sent');
+  }
+});
+
+test('CMC nonzero string codes and malformed success bodies fail closed', async () => {
+  for (const raw of ['1006','garbage','',true,{},-1]) {
+    const s=setup(); s.mapResponse(body => ({...body,status:{error_code:raw}}));
+    await s.scanner.run(Math.floor(s.now/900000));
+    assert.equal(s.messages.length,0); assert.equal(s.storage.get('status').ok,false);
+    if (raw==='1006') assert.equal(s.storage.get('status').code,1006);
+  }
+  const missing=setup(); missing.mapResponse(()=>({})); await missing.scanner.run(Math.floor(missing.now/900000));
+  assert.equal(missing.storage.get('status').kind,'invalid_response'); assert.equal(missing.messages.length,0);
 });
 
