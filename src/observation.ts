@@ -62,7 +62,15 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
       let body: any;
       try { body = await response.json(); }
       catch { throw new ScanRequestError(signal.aborted ? "timeout" : "invalid_response"); }
-      if (body.status?.error_code !== 0) throw new ScanRequestError("api", Number.isInteger(body.status?.error_code) ? body.status.error_code : undefined);
+      // Match the existing CMC tools: v3 may omit status or encode zero as a string.
+      const rawCode = body?.status?.error_code;
+      if (rawCode !== undefined && rawCode !== null) {
+        if ((typeof rawCode !== "number" && typeof rawCode !== "string") || rawCode === "" || (typeof rawCode === "string" && !/^\d+$/.test(rawCode))) throw new ScanRequestError("invalid_response");
+        const code = Number(rawCode);
+        if (!Number.isSafeInteger(code)) throw new ScanRequestError("invalid_response");
+        if (code !== 0) throw new ScanRequestError("api", code);
+      }
+      if (!body || typeof body !== "object" || body.data === undefined || body.data === null) throw new ScanRequestError("invalid_response");
       return body.data;
     };
     try {
