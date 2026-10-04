@@ -37,6 +37,29 @@ test('entry rejects stale/chased prices, broken history and insufficient target 
   const small=s.points.map(x=>({...x,price:Math.min(x.price,102)}));
   assert.equal(s.entryPlan(small,100.5,at,s.now),null);
 });
+test('delayed samples allow a bounded live move, but not a chased or falling entry', () => {
+  const s=setup(), points=s.points.map(x=>({...x,timestamp:new Date(Date.parse(x.timestamp)-15*60000).toISOString()}));
+  const at=new Date(s.now).toISOString();
+  assert.ok(s.entryPlan(points,100.9,at,s.now));
+  assert.equal(s.entryPlan(points,101.4,at,s.now),null);
+  assert.equal(s.entryPlan(points,100.1,at,s.now),null);
+});
+test('early consolidation breakout qualifies independently of pullback target room', () => {
+  const s=setup(), prices=[98,97,100,102,98,101,103,101.5,101,102,101.3,102.3];
+  const points=s.points.map((x,i)=>({...x,price:prices[i]})),at=new Date(s.now).toISOString();
+  const plan=s.entryPlan(points,102.3,at,s.now);
+  assert.ok(plan); assert.equal(plan.pattern,'breakout');
+  assert.equal(s.entryPlan(points,103.5,at,s.now),null);
+  const flat=points.map(x=>({...x,price:102})); assert.equal(s.entryPlan(flat,102,at,s.now),null);
+});
+test('momentum candidates receive priority without increasing the history request size', async () => {
+  const s=setup();
+  s.mapResponse(body=>Array.isArray(body.data)?{...body,data:Array.from({length:20},(_,i)=>({...s.listing,id:i+1,symbol:'X'+i,quote:{USD:{...s.listing.quote.USD,percent_change_1h:(i+1)/10}}}))}:body);
+  await s.scanner.run(Math.floor(s.now/900000));
+  const url=new URL(s.calls[1]); const ids=url.searchParams.get('id').split(',');
+  assert.equal(ids.length,5); assert.deepEqual(ids.slice(0,2),['20','19']);
+  assert.equal(s.storage.get('status').eligible,20);
+});
 test('disabled scanner makes no requests; enabled scanner serializes duplicate cron events and persists cooldown', async () => {
   const off=setup(false); await off.scanner.run(Math.floor(off.now/900000)); assert.equal(off.calls.length,0);
   const s=setup(); const slot=Math.floor(s.now/900000);
