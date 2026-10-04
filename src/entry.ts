@@ -1,7 +1,7 @@
 // Provisional sampled-price rule, evaluated only at the latest available point.
 // CMC prices cannot establish Neverless availability or executable net returns.
 export type EntryPoint = { timestamp: string; price: number };
-export type EntryPlan = { version: "entry-v1"; observed_at: string; quote_at: string; entry: number; min: number; max: number; target: number; stop: number; valid_until: string; review_until: string };
+export type EntryPlan = { version: "entry-v1" | "entry-v2"; pattern?: "pullback" | "breakout"; observed_at: string; quote_at: string; entry: number; min: number; max: number; target: number; stop: number; valid_until: string; review_until: string };
 export const ENTRY_POLICY = { gross: 0.0255, spread: 0.005, loss: 0.02, hours: 4, validityMinutes: 15 } as const;
 export function entryPlan(points: EntryPoint[], live: number, liveAt: string, now: number): EntryPlan | null {
   if (points.length < 12 || !Number.isFinite(live) || live <= 0) return null;
@@ -14,18 +14,28 @@ export function entryPlan(points: EntryPoint[], live: number, liveAt: string, no
   if (!Number.isFinite(currentAt) || now-currentAt>5*60000 || currentAt>now || currentAt<times[11]) return null;
   const low=p[10].price, last=p[11].price;
   const recovery=last/low-1;
-  if (!(low<p[9].price && recovery>=0.002 && recovery<=0.008)) return null;
   const troughs=p.slice(1,9).map((x,i)=>({i:i+1,price:x.price})).filter(x=>x.price<p[x.i-1].price && x.price<p[x.i+1].price);
-  if (!troughs.length || low<=troughs[troughs.length-1].price) return null;
   // A rising sampled support, followed by a pullback and an initial recovery.
   const priorHigh=Math.max(...p.slice(3,10).map(x=>x.price));
-  if (priorHigh/low-1<0.03 || priorHigh/low-1>0.08) return null;
-  // Abandon a stale/chased entry, even when the historical shape qualified.
-  if (live/last-1>0.003 || live<last*0.999) return null;
+  // Compare the live quote with the most recent sample without treating a
+  // normal 15-minute sampling delay as a 0.3% rejection. Cap extension anyway.
+  if (live/last-1>0.008 || live<last*0.997) return null;
   const min=live*0.9985, max=live*1.0015;
   const target=max*(1+ENTRY_POLICY.gross), stop=max*(1-ENTRY_POLICY.loss);
-  if (target>priorHigh || stop>=low*0.998 || stop>=min) return null;
-  return {version:"entry-v1",observed_at:new Date(now).toISOString(),quote_at:liveAt,entry:live,min,max,target,stop,
+  const pullback=low<p[9].price && recovery>=0.0015 && recovery<=0.012
+    && troughs.length>0 && low>troughs[troughs.length-1].price
+    && target<=priorHigh && stop<low*0.998;
+  // A separate early breakout: prior hour consolidates, two prior lows rise,
+  // and the latest sample clears that range without a large extension.
+  const base=p.slice(7,11), ceiling=Math.max(...base.map(x=>x.price));
+  const floor=Math.min(...base.map(x=>x.price));
+  const recentTroughs=p.slice(1,11).map((x,i)=>({i:i+1,price:x.price})).filter(x=>x.price<p[x.i-1].price && x.price<p[x.i+1].price);
+  const breakout=ceiling/floor-1>=0.005 && ceiling/floor-1<=0.025
+    && last/ceiling-1>=0.002 && last/ceiling-1<=0.012
+    && recentTroughs.length>=2 && recentTroughs[recentTroughs.length-1].price>recentTroughs[recentTroughs.length-2].price
+    && stop<floor*0.998 && live>=ceiling;
+  if ((!pullback && !breakout) || stop>=min) return null;
+  return {version:"entry-v2",pattern:pullback?"pullback":"breakout",observed_at:new Date(now).toISOString(),quote_at:liveAt,entry:live,min,max,target,stop,
     valid_until:new Date(now+ENTRY_POLICY.validityMinutes*60000).toISOString(),review_until:new Date(now+ENTRY_POLICY.hours*3600000).toISOString()};
 }
 export function entryOutcome(plan: EntryPlan, points: EntryPoint[], live: number, liveAt: string, now: number): "target" | "invalidated" | "expired" | "data_unavailable" | null {
