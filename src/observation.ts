@@ -79,12 +79,17 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
           && Number.isFinite(q?.volume_24h) && q.volume_24h >= 5_000_000
           && Number.isFinite(updated) && now - updated >= 0 && now - updated <= 20 * 60_000;
       }).sort((a: any,b: any)=>a.id-b.id);
-      // Rotate the eligible universe rather than repeatedly sampling only winners.
+      // Two priority slots respond to momentum; remaining slots rotate for coverage.
       const cursor = (await this.ctx.storage.get<number>("cursor") ?? 0) % Math.max(eligible.length,1);
       const rotated = eligible.slice(cursor).concat(eligible.slice(0,cursor));
       const candidates = followed.map(f=>normalized.find((a:any)=>a.id===f.id) ?? {id:f.id,symbol:f.symbol,quote:{USD:null}});
-      for (const a of rotated) { if (candidates.length>=5) break; if (!candidates.some((x:any)=>x.id===a.id)) candidates.push(a); }
-      await this.ctx.storage.put("cursor",cursor+Math.max(1,5-followed.length));
+      const checked=await this.ctx.storage.get<Record<string,number>>("history_checked") ?? {};
+      const priority=eligible.filter((a:any)=>now-(checked[a.id]??0)>=30*60000)
+        .sort((a:any,b:any)=>b.quote.USD.percent_change_1h-a.quote.USD.percent_change_1h).slice(0,2);
+      for (const a of priority) { if (candidates.length>=5) break; if (!candidates.some((x:any)=>x.id===a.id)) candidates.push(a); }
+      let rotatedAdded=0;
+      for (const a of rotated) { if (candidates.length>=5) break; if (!candidates.some((x:any)=>x.id===a.id)) { candidates.push(a); rotatedAdded++; } }
+      await this.ctx.storage.put("cursor",cursor+Math.max(1,rotatedAdded));
       if (!candidates.length) {
         await record({ ok: true, outcome: "no_candidates", candidates: 0, attempts: 0, sent: 0 });
         return;
@@ -92,6 +97,9 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
       stage = "history";
       const history = await get(`/v3/cryptocurrency/quotes/historical?id=${candidates.map((a: any) => a.id).join(",")}&convert=USD&interval=15m&time_start=${Math.floor((now - 4 * 3600_000) / 1000)}&time_end=${Math.floor(now / 1000)}`);
       const assets: any[] = Array.isArray(history) ? history : history?.id ? [history] : Object.values(history ?? {});
+      for (const a of candidates) checked[a.id]=now;
+      await this.ctx.storage.put("history_checked",Object.fromEntries(Object.entries(checked).filter(([,at])=>now-at<24*3600000)));
+      const decisions:Record<string,unknown>[]=[];
       const day = new Date(now).toISOString().slice(0, 10);
       const dailyKey=mode === "live" ? "daily" : "paper_daily";
       const count = await this.ctx.storage.get<{ day: string; count: number }>(dailyKey);
@@ -129,6 +137,7 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
         }
         if (followed.length>=2 || attempts>=2 || sentToday>=10) continue;
         const plan=entryPlan(points,q?.price,q?.last_updated,Date.now());
+        decisions.push({id:a.id,symbol:a.symbol,points:points.length,history_age_minutes:points.length?Math.round((now-Date.parse(points.at(-1)!.timestamp))/60000):null,pattern:plan?.pattern??null,qualified:!!plan});
         if (!plan) continue;
         const key = mode === "live" ? `last:${a.id}` : `paper_last:${a.id}`;
         const last = await this.ctx.storage.get<number>(key);
@@ -142,13 +151,13 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
         await audit({id:a.id,symbol:a.symbol,mode,outcome:"entry",plan});
         const n=(v:number)=>Number(v.toPrecision(8)).toString();
         const when=(iso:string)=>new Intl.DateTimeFormat("fr-FR",{timeZone:"Europe/Paris",dateStyle:"short",timeStyle:"short"}).format(new Date(iso))+" (Paris)";
-        const delivered = mode === "live" && await sendTelegram(this.env, `🚨 ENTRÉE POTENTIELLE\n\nCrypto : ${a.symbol}\nZone CMC : ${n(plan.min)} – ${n(plan.max)} USD\nObjectif CMC : ${n(plan.target)} USD (+2,55 % depuis le haut de zone)\nInvalidation : ${n(plan.stop)} USD (−2 % depuis le haut de zone)\nEntrée valable jusqu’à : ${when(plan.valid_until)}\nSuivi : 4 h maximum\nMotif : Repli sur creux ascendant, début de reprise et marge avant le sommet récent.\nAvant achat : vérifier disponibilité et prix achat/vente Neverless ; abandonner hors zone ou si spread > 0,5 %. Objectif estimé 2 % net sous cette hypothèse, non garanti. Prix CMC non exécutables ; aucun achat automatique.`);
+        const delivered = mode === "live" && await sendTelegram(this.env, `🚨 ENTRÉE POTENTIELLE\n\nCrypto : ${a.symbol}\nZone CMC : ${n(plan.min)} – ${n(plan.max)} USD\nObjectif CMC : ${n(plan.target)} USD (+2,55 % depuis le haut de zone)\nInvalidation : ${n(plan.stop)} USD (−2 % depuis le haut de zone)\nEntrée valable jusqu’à : ${when(plan.valid_until)}\nSuivi : 4 h maximum\nMotif : ${plan.pattern === "breakout" ? "Début de cassure d’une consolidation avec creux ascendants ; poursuite au-delà du sommet non garantie." : "Repli sur creux ascendant, début de reprise et marge avant le sommet récent."}\nAvant achat : vérifier disponibilité et prix achat/vente Neverless ; abandonner hors zone ou si spread > 0,5 %. Objectif estimé 2 % net sous cette hypothèse, non garanti. Prix CMC non exécutables ; aucun achat automatique.`);
         entry.notified=delivered;
         await this.ctx.storage.put("entries",followed);
         await audit({id:a.id,mode,outcome:"entry_delivery",sent:delivered});
         if (delivered) sent++;
       }
-      await record({ mode, candidates: candidates.length, attempts, sent, reserved_today: sentToday, ok: mode === "paper" || sent === attempts, outcome: mode === "paper" ? "simulation" : attempts === 0 ? "no_alert" : sent === attempts ? "sent" : "delivery_unconfirmed" });
+      await record({ mode, eligible:eligible.length, decisions, candidates: candidates.length, attempts, sent, reserved_today: sentToday, ok: mode === "paper" || sent === attempts, outcome: mode === "paper" ? "simulation" : attempts === 0 ? "no_alert" : sent === attempts ? "sent" : "delivery_unconfirmed" });
     } catch (error) {
       await record({ ok: false, outcome: "data_error", stage, kind: error instanceof ScanRequestError ? error.kind : "internal", ...(error instanceof ScanRequestError && error.code !== undefined ? { code: error.code } : {}) });
     }
