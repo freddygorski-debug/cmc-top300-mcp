@@ -12,7 +12,23 @@ Provisional thresholds: four-hour decline below -0.5% rejects; 24h below -3% nee
 
 Zone is live +/-0.15%. Target is upper zone *1.0255. Technical stop lies below sampled support with 0.2–0.4% buffer, capped at 2% risk from upper zone. An overhead sampled peak must leave room for target. With no sampled peak, the previous four-hour advance must cover the target distance: provisional momentum projection, not evidence of a guaranteed price. Price discovery is therefore treated with explicit uncertainty.
 
-Objective aims at about 2% net under the user's assumed total spread <=0.5%; Neverless availability, execution quotes and actual round-trip costs remain unchecked. Catalysts are explicitly NOT VERIFIED: no approved structured news source exists in this Worker. Five-minute OHLC, candle volume, macro and actual portfolio holdings are also unavailable. The manual prompt can research these; this automated revision cannot claim full prompt fidelity.
+Objective aims at about 2% net under the user's assumed total spread <=0.5%; Neverless availability, execution quotes and actual round-trip costs remain unchecked. Five-minute OHLC, candle volume, macro and actual portfolio holdings are also unavailable. The manual prompt can research these; this automated revision cannot claim full prompt fidelity.
+
+## Optional publication evidence
+
+`src/news.ts` adds a bounded publication lookup for ETH, FIL, SUI and STX. These are the only supported IDs/symbols; other assets explicitly remain unverified. Ethereum Foundation and Sui expose RSS feeds. Filecoin publishes JSON-LD: examine only the first two allowlisted articles in its index. The Stacks site is an ecosystem aggregator, not necessarily the original announcement author, and the alert labels it as such. This is publication evidence, not semantic verification of a market catalyst or an assertion of price causation. Even a recent official article may be irrelevant to the trade.
+
+Check publication time (not modification time), reject future/undated records, and search a provisional 72-hour window. At most 30 RSS items or two Filecoin detail pages are examined. “None verified in consulted publications”, “source unavailable” and “no source configured” remain different states. An old post modified today cannot be presented as a new announcement. The lookup does not parse or validate future event dates within article text.
+
+Cache both success and failure for one hour, recheck recency when reading cache, cap documents at 1 MB and share a three-second timeout across each source's requests. Use fixed HTTPS sources and exact host/path allowlists, reject credentials/query strings and never follow redirects. Requests contain no CMC or Telegram credentials. Requests run alongside history; optional news can add at most three seconds when history is faster. The dispatch quote is read after news has settled and is still checked with a five-minute age limit. News success is never an additional entry confirmation or a veto. The new sources require no subscription or secret, and do not consume CMC credits.
+
+Manual source-adapter validation on 2026-10-06 at 12:24 Paris succeeded for all four configured sources (six HTTP requests, no Telegram send). ETH/STX had recent publications; the consulted FIL/SUI articles did not. This checks parsing/access from the local runtime, not permanent availability or production network access. Failures from production remain explicitly unavailable.
+
+## Context and replay
+
+Before dispatch, refresh available 24h/7d/rolling-volume context as well as price; deteriorated volume can reject even an unchanged price. The alert shows the current quote time and the asset's reported one-hour change relative to BTC in percentage points, when available. These are CMC rolling changes, not synchronized candle comparisons or a new market veto. BTC/ETH context requires fresh listing quotes; the audit includes positive/negative breadth, median hour and actual non-stablecoin coverage.
+
+Persist the last 24 scans' bounded source snapshots: selected listing quotes, sampled history, publication status/evidence, actual dispatch quote, coverage and decisions. This allows inspection of observed cases without fabricating inputs from later charts. The universe remains 300 listing quotes and at most five detailed histories; recording missing coverage is not full coverage. Public publication links are retained in storage; no source response body or credential is logged.
 
 ## Quota and protections
 
@@ -24,4 +40,4 @@ Audit includes actual coverage, rejection reason, calculated metrics, context, p
 
 ## Validation
 
-Behavior tests cover stale/falling quotes, risk/target constraints, stronger hourly movers, fresh quote rejection, persisted budgets/cooldown, rolling follow-up checkpoints, silent outcomes and legacy Telegram routes. TypeScript also checked. These establish behavior, not profitability; this is a draft revision needing prospective evaluation and missing-data integration, not a completed investment strategy.
+35 behavior tests cover stale/falling quotes, risk/target constraints, stronger hourly movers, fresh price/context rejection, persisted budgets/cooldown, rolling follow-up checkpoints, silent outcomes, publication age/cache/failures/allowlists/bounds, snapshot retention including dispatch failures and legacy Telegram routes. TypeScript also checked. These establish behavior, not profitability; this is a draft revision needing prospective evaluation and missing-data integration, not a completed investment strategy.
