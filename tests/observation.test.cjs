@@ -14,12 +14,13 @@ function setup(enabled = true, live = true) {
   const env = { AUTO_SCAN_ENABLED: enabled ? 'true' : undefined, ENTRY_ALERTS_ENABLED: live ? 'true' : undefined, CMC_API_KEY: 'fake', TELEGRAM_BOT_TOKEN: 'fake', TELEGRAM_CHAT_ID: '1' };
   const listing = { id: 1, symbol: 'BTC', cmc_rank: 1, tags: [], quote: { USD: { price: 100.5, percent_change_1h: 2, volume_change_24h: 20, volume_24h: 10000000, last_updated: new Date(now).toISOString() } } };
   const context = { exports: {}, Date, AbortSignal, Number, Object, Error, Promise,
+    Intl, URL, TextDecoder, Uint8Array,
     console: { log: text => logs.push(JSON.parse(text)) },
     DurableObject: class { constructor(ctx, env) { this.ctx = ctx; this.env = env; } },
     sendTelegram: async (env, text) => { messages.push(text); return true; },
     fetch: async url => { calls.push(url); return { ok: true, json: async () => ({ status: {error_code:0}, data: url.includes('listings') ? [listing] : url.includes('quotes/latest') ? {1:listing} : { 1: { id: 1, quotes: points.map(x => ({ timestamp:x.timestamp, quote:{USD:{price:x.price}} })) } } }) }; },
   };
-  const source = (fs.readFileSync('src/entry.ts','utf8')+'\n'+fs.readFileSync('src/observation.ts','utf8')).replace(/^import .*;\r?\n/gm,'');
+  const source = (fs.readFileSync('src/entry.ts','utf8')+'\n'+fs.readFileSync('src/news.ts','utf8')+'\n'+fs.readFileSync('src/observation.ts','utf8')).replace(/^import .*;\r?\n/gm,'');
   vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,context);
   return { ...context.exports, scanner: new context.exports.ObservationScanner(ctx, env), now, storage, calls, messages, points, listing, logs,
     mapResponse: transform => { const original = context.fetch; context.fetch = async url => { const response = await original(url); const body = await response.json(); return { ...response, json: async () => transform(body) }; }; },
@@ -194,4 +195,55 @@ test('same sampled setup does not send again after closure and cooldown', async 
  await s.restart().run(slot+1);
  assert.equal(s.messages.length,1);
  assert.ok(s.storage.get('entry_audit').some(x=>x.outcome==='duplicate_setup'));
+});
+
+test('optional publication lookup enriches a single entry or fails without blocking it; dispatch quote is last',async()=>{
+ for (const available of [true,false]) {
+  const s=setup(); s.listing.id=20947; s.listing.symbol='SUI'; let newsSettled=false;
+  s.setFetch(async url=>{
+   s.calls.push(url);
+   if (url.startsWith('https://www.sui.io/')) {
+    await Promise.resolve(); newsSettled=true;
+    if (!available) throw new Error('SECRET_SOURCE_ERROR');
+    return new Response(`<rss><channel><item><title>Network launch</title><link>https://www.sui.io/blog/network-launch</link><pubDate>${new Date(s.now).toISOString()}</pubDate></item></channel></rss>`);
+   }
+   if (url.includes('quotes/latest')) assert.equal(newsSettled,true);
+   const data=url.includes('listings')?[s.listing]:url.includes('quotes/latest')?{20947:s.listing}:{20947:{id:20947,quotes:s.points.map(x=>({timestamp:x.timestamp,quote:{USD:{price:x.price}}}))}};
+   return {ok:true,json:async()=>({data})};
+  });
+  await s.scanner.run(Math.floor(s.now/900000));
+  assert.equal(s.messages.length,1); assert.ok(s.calls.at(-1).includes('quotes/latest'));
+  assert.ok(s.messages[0].includes(available?'Network launch':'recherche indisponible'));
+  assert.equal(JSON.stringify(s.logs).includes('SECRET'),false);
+  const evidence=s.storage.get('scan_evidence')[0].assets[0];
+  assert.equal(evidence.points.length,17); assert.equal(evidence.dispatch_quote.price,100.5);
+  assert.equal(evidence.news.status,available?'recent_publication':'unavailable');
+ }
+});
+test('a fresh deterioration in rolling volume cancels dispatch even at an unchanged price',async()=>{
+ const s=setup(); s.mapResponse(body=>body.data?.[1]?.symbol?{...body,data:{1:{...s.listing,quote:{USD:{...s.listing.quote.USD,volume_change_24h:-40}}}}}:body);
+ await s.scanner.run(Math.floor(s.now/900000));
+ assert.equal(s.messages.length,0); assert.equal(s.storage.get('daily'),undefined);
+ assert.ok(s.storage.get('entry_audit').some(x=>x.outcome==='pre_send_rejected' && x.reason==='declining_rolling_volume'));
+});
+test('evidence snapshots are bounded and distinguish actual history coverage from the universe',async()=>{
+ const s=setup();s.storage.set('scan_evidence',Array.from({length:24},(_,i)=>({at:i})));
+ await s.scanner.run(Math.floor(s.now/900000));
+ const evidence=s.storage.get('scan_evidence');assert.equal(evidence.length,24);
+ const latest=evidence.at(-1);assert.equal(latest.universe,1);assert.equal(latest.assets.length,1);
+ assert.equal(latest.assets[0].quote.price,100.5);assert.equal(latest.decisions[0].reason,'qualified');
+ assert.equal(latest.market.coverage,1);assert.equal(latest.market.positive,1);
+ assert.equal(JSON.stringify(latest).includes('fake'),false);
+});
+test('dispatch network failure preserves the observed inputs without reserving or leaking an entry',async()=>{
+ const s=setup();s.setFetch(async url=>{
+  if(url.includes('quotes/latest')) throw new Error('SECRET_REQUEST_FAILURE');
+  const data=url.includes('listings')?[s.listing]:{1:{id:1,quotes:s.points.map(x=>({timestamp:x.timestamp,quote:{USD:{price:x.price}}}))}};
+  return {ok:true,json:async()=>({data})};
+ });
+ await s.scanner.run(Math.floor(s.now/900000));
+ assert.equal(s.messages.length,0);assert.equal(s.storage.get('daily'),undefined);
+ const snapshot=s.storage.get('scan_evidence')[0];assert.equal(snapshot.assets[0].points.length,17);
+ assert.equal(snapshot.failure.stage,'delivery');assert.equal(snapshot.failure.kind,'network');
+ assert.equal(JSON.stringify(s.logs).includes('SECRET'),false);assert.equal(JSON.stringify(snapshot).includes('SECRET'),false);
 });
