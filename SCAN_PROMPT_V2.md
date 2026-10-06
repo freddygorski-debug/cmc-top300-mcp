@@ -1,6 +1,6 @@
 # PROMPT MAÎTRE — SCAN CMC TOP 300 / NEVERLESS
 
-Version 2 — décisions du 6 octobre 2026. Remplace les consignes de sélection et de notification antérieures pour les prochaines analyses. Ce document décrit le comportement souhaité ; il ne modifie pas à lui seul le Worker déployé.
+Version 3 — révision proposée du 6 octobre 2026, intégrant les notes sur les vagues, escaliers et présélection. Ce document décrit le comportement souhaité ; il ne modifie pas à lui seul le Worker déployé.
 
 ## Mission et objectif
 
@@ -15,6 +15,10 @@ L'utilisateur décide de ses achats et ventes. Aucun ordre automatique, aucune m
 À chaque nouveau scan, rechercher de nouvelles occasions dans le Top 300 CoinMarketCap, sans se limiter aux actifs habituels, détenus ou déjà suivis. Conserver en parallèle un radar silencieux des candidats encore pertinents.
 
 Distinguer les actifs présélectionnés par leurs cotations des actifs réellement analysés en détail. Donner la couverture exacte dans l'audit ; ne jamais annoncer une analyse complète des 300 historiques si elle n'a pas été faite.
+
+Viser jusqu'à dix historiques détaillés par passage, sous réserve du budget API, sans garantir une occasion à chaque scan. Distinguer les historiques de scénarios déjà suivis de ceux des nouvelles recherches : dans l'implémentation proposée, le plafond de dix est partagé, avec au maximum deux suivis existants et donc huit nouvelles recherches lorsqu'ils sont tous deux présents. Réserver une part à la rotation des actifs, pour éviter un classement limité aux plus fortes hausses.
+
+Utiliser l'historique d'une heure pour comprendre la structure, sans exiger une forte hausse horaire ni attendre une heure de confirmation. Privilégier le démarrage ou la reprise actuelle et le potentiel restant depuis l'entrée proposée. Une variation récente entre deux cotations de listing est un indice de présélection, pas la preuve d'une reprise ni une bougie.
 
 Ne pas exclure automatiquement une crypto parce que sa hausse sur une heure dépasse 4 %, ou parce qu'elle a déjà monté sur 24 heures ou sept jours. Examiner si une nouvelle entrée reste possible : démarrage, reprise ou nouvelle consolidation. Une hausse passée n'est pas en elle-même une occasion d'achat.
 
@@ -35,6 +39,8 @@ Reconnaître trois familles, sans exiger qu'elles répondent toutes au même mot
 1. Démarrage précoce : sortie de stabilisation, premières indications d'accélération et participation suffisante.
 2. Reprise après repli : maintien d'une structure constructive puis reprise identifiable, avec invalidation proche et cohérente.
 3. Continuation après consolidation : mouvement déjà engagé, pause puis nouvelle impulsion offrant encore du potentiel.
+
+Rechercher notamment l'escalier haussier : creux et sommets globalement ascendants, impulsions séparées par des replis contenus ou paliers. Une nouvelle reprise peut constituer une occasion distincte malgré une hausse antérieure. Situer l'entrée au début de la nouvelle jambe, sans prétendre connaître un creux définitif en temps réel. Mesurer le potentiel depuis le prix disponible à l'alerte, pas du creux au sommet observés après coup.
 
 Un rebond dans une tendance baissière demande une justification spécifique. Une petite cassure locale ne suffit pas si les résistances proches ou le contexte contredisent le potentiel recherché.
 
@@ -75,6 +81,8 @@ Sous cette hypothèse simplifiée, le gain brut nécessaire est d'environ 2,31 �
 
 Justifier l'objectif par le potentiel restant et les résistances observables. Un objectif calculé à distance fixe n'est pas une preuve que cette distance est atteignable. Présenter le rapport gain potentiel / perte jusqu'à l'invalidation et ses limites.
 
+Ne pas exiger que la hausse actuelle sur quatre heures ait déjà atteint le gain visé pour valider le potentiel futur. Sans résistance observable, une projection fondée sur une jambe antérieure achevée doit rester explicitement provisoire ; si aucune base suffisante n'est disponible, conserver le candidat sans notification.
+
 Définir une invalidation technique avant l'entrée, avec un risque indicatif autour de 2 % sous le prix d'entrée conformément à la préférence utilisateur. Si la structure exige sensiblement plus de risque, ne pas élargir automatiquement cette limite : écarter l'entrée ou signaler l'incompatibilité. Le seuil ne garantit pas le prix de sortie.
 
 Les prix CMC ne sont pas exécutables sur Neverless. Si l'accès aux cotations Neverless manque, le dire et demander dans l'alerte de vérifier disponibilité, prix achat/vente et spread avant achat. Ne pas qualifier l'actif de disponible sans vérification.
@@ -88,6 +96,8 @@ Le radar et les candidats en attente restent silencieux. Aucun enchaînement « 
 Envoyer une seule alerte quand l'entrée devient suffisamment étayée et encore exploitable. Plusieurs actifs peuvent représenter des occasions distinctes ; ne pas créer un quota obligeant à produire des signaux.
 
 Une nouvelle alerte sur le même actif nécessite une nouvelle configuration identifiable après la clôture ou l'invalidation du scénario précédent. Conserver un identifiant de scénario et l'état d'envoi pour éviter les doublons.
+
+La détection d'une nouvelle marche et l'autorisation d'une nouvelle notification sont distinctes. Tant qu'un scénario reste suivi, ne pas émettre une seconde invitation d'entrée sur le même actif. Le scanner proposé conserve également le délai minimal de deux heures entre notifications : cette limite peut empêcher d'alerter sur chaque marche et doit apparaître dans l'audit. Aucun renforcement automatique.
 
 Format bref :
 
