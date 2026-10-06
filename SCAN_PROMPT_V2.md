@@ -81,6 +81,8 @@ Les prix CMC ne sont pas exécutables sur Neverless. Si l'accès aux cotations N
 
 ## Une seule alerte d'entrée par occasion
 
+Plage d'envoi automatique ajoutée à la demande de Freddy : de 9 h inclus à 23 h exclu, heure Europe/Paris, avec adaptation automatique heure d'été/hiver. Le scanner et le suivi restent actifs la nuit. Ne pas mettre les entrées nocturnes en attente d'envoi : après 9 h, toute alerte doit correspondre à une nouvelle analyse actuelle. Les tests et envois manuels expressément demandés ne relèvent pas de cette plage automatique.
+
 Le radar et les candidats en attente restent silencieux. Aucun enchaînement « à surveiller », « presque prêt », puis entrée tardive. Aucun message d'entrée répété pour le même scénario ni alerte de renforcement automatique.
 
 Envoyer une seule alerte quand l'entrée devient suffisamment étayée et encore exploitable. Plusieurs actifs peuvent représenter des occasions distinctes ; ne pas créer un quota obligeant à produire des signaux.

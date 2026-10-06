@@ -16,13 +16,29 @@ Objective aims at about 2% net under the user's assumed total spread <=0.5%; Nev
 
 ## Optional publication evidence
 
-`src/news.ts` adds a bounded publication lookup for ETH, FIL, SUI and STX. These are the only supported IDs/symbols; other assets explicitly remain unverified. Ethereum Foundation and Sui expose RSS feeds. Filecoin publishes JSON-LD: examine only the first two allowlisted articles in its index. The Stacks site is an ecosystem aggregator, not necessarily the original announcement author, and the alert labels it as such. This is publication evidence, not semantic verification of a market catalyst or an assertion of price causation. Even a recent official article may be irrelevant to the trade.
+### Broader press discovery
+
+For every detailed candidate with a valid CMC full asset name, search the public Google News RSS index in English, using the quoted full name and a three-day window. This removes the four-asset restriction on *search*, not on verified official announcements. Only dated headlines containing that asset-name phrase, with a matching publisher name/HTTPS publisher domain from the curated press list, are retained. Exclude common promotional headline patterns, future/undated items, ticker-only matches, and unsafe links. Only the first 30 items are examined; an empty filtered result does not prove there is no relevant news.
+
+Press is clearly labelled as relayed discovery with content unverified; the body and original event timing are not independently checked. Publisher/date metadata are supplied by Google News. No causation, guaranteed catalyst, bullish classification or original-source certification is inferred. The article link remains a Google News article link; no arbitrary publisher URL is fetched. This RSS surface has no contracted API availability guarantee, and failures remain optional/unavailable.
+
+Official and press queries run concurrently, alongside CMC history, each with the existing three-second timeout, one-hour success/failure cache and 1 MB bound. A recent official publication wins; otherwise use available press evidence. Preserve both lookup statuses in the audit. The final price is re-read after both lookups settle. No news confirmations enter the price rules, no new API key/subscription is used, and no additional CMC credit is consumed. The CMC content API was considered but is documented for Growth and higher plans, so it is not used with Freddy's Basic plan. Reference: https://coinmarketcap.com/api/documentation/pro-api-reference/content
+
+Live adapter verification on 2026-10-06 at 13:24 Paris searched NEAR Protocol, Raydium and Bitcoin (three HTTP requests). Bitcoin had a retained CoinDesk headline; NEAR/RAY had no retained result after filtering. This verifies access/parsing, not news completeness or catalyst effectiveness.
+
+The first-party publication adapters in `src/news.ts` cover ETH, FIL, SUI and STX. Other assets can now use press discovery, while their official announcements remain unverified. Ethereum Foundation and Sui expose RSS feeds. Filecoin publishes JSON-LD: examine only the first two allowlisted articles in its index. The Stacks site is an ecosystem aggregator, not necessarily the original announcement author, and the alert labels it as such. This is publication evidence, not semantic verification of a market catalyst or an assertion of price causation. Even a recent official article may be irrelevant to the trade.
 
 Check publication time (not modification time), reject future/undated records, and search a provisional 72-hour window. At most 30 RSS items or two Filecoin detail pages are examined. “None verified in consulted publications”, “source unavailable” and “no source configured” remain different states. An old post modified today cannot be presented as a new announcement. The lookup does not parse or validate future event dates within article text.
 
 Cache both success and failure for one hour, recheck recency when reading cache, cap documents at 1 MB and share a three-second timeout across each source's requests. Use fixed HTTPS sources and exact host/path allowlists, reject credentials/query strings and never follow redirects. Requests contain no CMC or Telegram credentials. Requests run alongside history; optional news can add at most three seconds when history is faster. The dispatch quote is read after news has settled and is still checked with a five-minute age limit. News success is never an additional entry confirmation or a veto. The new sources require no subscription or secret, and do not consume CMC credits.
 
 Manual source-adapter validation on 2026-10-06 at 12:24 Paris succeeded for all four configured sources (six HTTP requests, no Telegram send). ETH/STX had recent publications; the consulted FIL/SUI articles did not. This checks parsing/access from the local runtime, not permanent availability or production network access. Failures from production remain explicitly unavailable.
+
+## Automatic notification hours
+
+Automatic entry sends may be initiated only between 09:00 inclusive and 23:00 exclusive in Europe/Paris, including summer/winter clock changes. Cron remains every 15 minutes around the clock; analysis, silent radar and existing follow-up continue overnight. Night-qualified candidates do not reserve entry/cooldown/setup state or spend final-quote budget. Nothing is queued for 09:00: the morning scan must qualify current data again.
+
+Recheck the window after the final quote and immediately before the Telegram call. If storage awaits cross 23:00 after reservation, undo the known-unsent entry, daily reservation, cooldown and setup ID, preserving any prior values. An already initiated Telegram request cannot be recalled and may arrive shortly after the boundary because of network delivery time. Explicit manual test/alert routes remain available and unchanged. Paper mode may keep simulated opportunities overnight but sends no Telegram message.
 
 ## Context and replay
 
@@ -40,4 +56,4 @@ Audit includes actual coverage, rejection reason, calculated metrics, context, p
 
 ## Validation
 
-35 behavior tests cover stale/falling quotes, risk/target constraints, stronger hourly movers, fresh price/context rejection, persisted budgets/cooldown, rolling follow-up checkpoints, silent outcomes, publication age/cache/failures/allowlists/bounds, snapshot retention including dispatch failures and legacy Telegram routes. TypeScript also checked. These establish behavior, not profitability; this is a draft revision needing prospective evaluation and missing-data integration, not a completed investment strategy.
+44 behavior tests cover stale/falling quotes, risk/target constraints, stronger hourly movers, fresh price/context rejection, persisted budgets/cooldown, rolling follow-up checkpoints, silent outcomes, publication age/cache/failures/allowlists/bounds, broader press lookup/filtering, snapshot retention, Paris clock/DST boundaries, continued overnight follow-up and late reservation rollback, plus legacy Telegram routes. TypeScript also checked. These establish behavior, not profitability; this revision needs prospective evaluation and missing-data integration, not a completed investment strategy.

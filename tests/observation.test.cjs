@@ -3,18 +3,20 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const ts = require('typescript');
-function setup(enabled = true, live = true) {
-  const now = Date.now();
+function setup(enabled = true, live = true, start = Date.parse("2026-10-07T10:00:00Z")) {
+  const now = start;
+  let clock = start;
+  const ClockDate = class extends Date { static now() { return clock; } };
   const storage = new Map(); const calls = []; const messages = []; const logs = [];
   const prices = [98,99,98,100,101,104,99,99,99,99.5,100,99.9,99.8,100,100.1,100,100.5];
   const points = prices.map((price, i) => ({ timestamp: new Date(now - (prices.length-1-i)*900000).toISOString(), price }));
-  const ctx = { storage: { get: async key => storage.get(key), put: async (key, value) => {
+  const ctx = { storage: { get: async key => storage.get(key), delete: async key => storage.delete(key), put: async (key, value) => {
     if (typeof key === 'string') storage.set(key, value); else Object.entries(key).forEach(([k,v])=>storage.set(k,v));
   } } };
   const env = { AUTO_SCAN_ENABLED: enabled ? 'true' : undefined, ENTRY_ALERTS_ENABLED: live ? 'true' : undefined, CMC_API_KEY: 'fake', TELEGRAM_BOT_TOKEN: 'fake', TELEGRAM_CHAT_ID: '1' };
   const listing = { id: 1, symbol: 'BTC', cmc_rank: 1, tags: [], quote: { USD: { price: 100.5, percent_change_1h: 2, volume_change_24h: 20, volume_24h: 10000000, last_updated: new Date(now).toISOString() } } };
-  const context = { exports: {}, Date, AbortSignal, Number, Object, Error, Promise,
-    Intl, URL, TextDecoder, Uint8Array,
+  const context = { exports: {}, Date: ClockDate, AbortSignal, Number, Object, Error, Promise,
+    Intl, URL, URLSearchParams, TextDecoder, Uint8Array,
     console: { log: text => logs.push(JSON.parse(text)) },
     DurableObject: class { constructor(ctx, env) { this.ctx = ctx; this.env = env; } },
     sendTelegram: async (env, text) => { messages.push(text); return true; },
@@ -25,7 +27,7 @@ function setup(enabled = true, live = true) {
   return { ...context.exports, scanner: new context.exports.ObservationScanner(ctx, env), now, storage, calls, messages, points, listing, logs,
     mapResponse: transform => { const original = context.fetch; context.fetch = async url => { const response = await original(url); const body = await response.json(); return { ...response, json: async () => transform(body) }; }; },
     setFetch: fetch => { context.fetch = fetch; }, setSignal: signal => { context.AbortSignal = { timeout: () => signal }; },
-    restart: () => new context.exports.ObservationScanner(ctx, env), failSend: () => { context.sendTelegram = async () => false; } };
+    setClock: at => { clock = at; }, setPut: put => { ctx.storage.put=put; }, restart: () => new context.exports.ObservationScanner(ctx, env), failSend: () => { context.sendTelegram = async () => false; } };
 }
 test('entry rejects stale/chased prices, broken history and insufficient target room', () => {
   const s=setup(), at=new Date(s.now).toISOString();
@@ -246,4 +248,63 @@ test('dispatch network failure preserves the observed inputs without reserving o
  const snapshot=s.storage.get('scan_evidence')[0];assert.equal(snapshot.assets[0].points.length,17);
  assert.equal(snapshot.failure.stage,'delivery');assert.equal(snapshot.failure.kind,'network');
  assert.equal(JSON.stringify(s.logs).includes('SECRET'),false);assert.equal(JSON.stringify(snapshot).includes('SECRET'),false);
+});
+test('Paris alert window includes 09:00 and excludes 23:00 in winter, summer and DST change dates',()=>{
+ const s=setup();
+ for(const [start,end] of [['2026-01-10T08:00:00Z','2026-01-10T22:00:00Z'],['2026-07-10T07:00:00Z','2026-07-10T21:00:00Z'],['2026-03-29T07:00:00Z','2026-03-29T21:00:00Z'],['2026-10-25T08:00:00Z','2026-10-25T22:00:00Z']]) {
+  assert.equal(s.entryAlertsAllowed(Date.parse(start)-1),false);assert.equal(s.entryAlertsAllowed(Date.parse(start)),true);
+  assert.equal(s.entryAlertsAllowed(Date.parse(end)-1),true);assert.equal(s.entryAlertsAllowed(Date.parse(end)),false);
+ }
+ assert.equal(s.entryAlertsAllowed(NaN),false);
+});
+test('night scan keeps the radar but makes no send reservation, fresh-quote request or queued morning entry',async()=>{
+ const s=setup(true,true,Date.parse('2026-10-07T21:15:00Z'));
+ await s.scanner.run(Math.floor(s.now/900000));
+ assert.equal(s.calls.length,2);assert.equal(s.messages.length,0);assert.equal(s.storage.get('daily'),undefined);
+ assert.equal(s.storage.get('fresh_daily'),undefined);assert.equal(s.storage.get('entries').length,0);assert.ok(s.storage.get('radar')[1]);
+ const morning=Date.parse('2026-10-08T07:00:00Z'),delta=morning-s.now;s.setClock(morning);
+ s.points.forEach(x=>x.timestamp=new Date(Date.parse(x.timestamp)+delta).toISOString());s.listing.quote.USD.last_updated=new Date(morning).toISOString();
+ s.listing.quote.USD.price=100.4;await s.restart().run(Math.floor(morning/900000));
+ assert.equal(s.messages.length,0); // New price fails: no replay of yesterday's qualified occasion.
+});
+test('night window does not stop following an existing live scenario',async()=>{
+ const s=setup(true,true,Date.parse('2026-10-07T21:15:00Z'));
+ const plan=s.entryPlan(s.points,100.5,new Date(s.now).toISOString(),s.now);plan.quote_at=new Date(s.now-900000).toISOString();
+ s.storage.set('entries',[{id:1,symbol:'BTC',plan,mode:'live',notified:true}]);
+ await s.scanner.run(Math.floor(s.now/900000));assert.equal(s.messages.length,0);assert.equal(s.storage.get('entries').length,1);
+ assert.equal(s.storage.get('entries')[0].checked_at,s.listing.quote.USD.last_updated);
+});
+test('crossing 23:00 during storage writes cancels the unsent reservation and restores previous state',async()=>{
+ for(const prior of [false,true]) {
+  const s=setup(true,true,Date.parse('2026-10-07T20:59:59.500Z')),old=s.now-3*3600000;
+  if(prior){s.storage.set('last:1',old);s.storage.set('live:setup:1','previous');s.storage.set('daily',{day:'2026-10-07',count:3});}
+  s.setPut(async(key,value)=>{
+   if(typeof key==='string')s.storage.set(key,value);else Object.entries(key).forEach(([k,v])=>s.storage.set(k,v));
+   if(key==='entry_audit' && value.at(-1)?.outcome==='entry')s.setClock(Date.parse('2026-10-07T21:00:00Z'));
+  });
+  await s.scanner.run(Math.floor(s.now/900000));assert.equal(s.messages.length,0);assert.equal(s.storage.get('entries').length,0);
+  assert.equal(s.storage.get('daily').count,prior?3:0);assert.equal(s.storage.get('last:1'),prior?old:undefined);
+  assert.equal(s.storage.get('live:setup:1'),prior?'previous':undefined);assert.equal(s.storage.get('status').attempts,0);
+ }
+});
+test('a candidate outside the four official sources receives optional press evidence before the final quote',async()=>{
+ const s=setup();s.listing.id=6535;s.listing.symbol='NEAR';s.listing.name='NEAR Protocol';let pressDone=false;
+ s.setFetch(async url=>{
+  s.calls.push(url);
+  if(url.startsWith('https://news.google.com/')){pressDone=true;return new Response(`<rss><channel><item><title>NEAR Protocol launches network upgrade</title><link>https://news.google.com/rss/articles/example</link><pubDate>${new Date(s.now).toISOString()}</pubDate><source url="https://www.coindesk.com">CoinDesk</source></item></channel></rss>`);}
+  if(url.includes('quotes/latest'))assert.equal(pressDone,true);
+  const data=url.includes('listings')?[s.listing]:url.includes('quotes/latest')?{6535:s.listing}:{6535:{id:6535,quotes:s.points.map(x=>({timestamp:x.timestamp,quote:{USD:{price:x.price}}}))}};
+  return {ok:true,json:async()=>({data})};
+ });
+ await s.scanner.run(Math.floor(s.now/900000));assert.equal(s.messages.length,1);
+ assert.ok(s.messages[0].includes('CoinDesk'));assert.ok(s.messages[0].includes('contenu non'));
+ assert.equal(s.storage.get('scan_evidence')[0].assets[0].news.press_status,'recent_publication');
+ assert.ok(s.calls.at(-1).includes('quotes/latest'));
+});
+test('a scan crossing 23:00 during the fresh quote does not reserve or send an entry',async()=>{
+ const s=setup(true,true,Date.parse('2026-10-07T20:59:59.500Z'));
+ s.mapResponse(body=>{if(body.data?.[1]?.symbol)s.setClock(Date.parse('2026-10-07T21:00:00Z'));return body;});
+ await s.scanner.run(Math.floor(s.now/900000));assert.equal(s.messages.length,0);
+ assert.equal(s.storage.get('daily'),undefined);assert.equal(s.storage.get('last:1'),undefined);
+ assert.equal(s.storage.get('fresh_daily').count,1);
 });

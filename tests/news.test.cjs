@@ -5,7 +5,7 @@ const vm=require('node:vm');
 const ts=require('typescript');
 function setup(fetchImpl) {
   const values=new Map(),calls=[];
-  const context={exports:{},Date,Intl,URL,TextDecoder,Uint8Array,AbortSignal,Error,Number,Object,Array,String,Set,
+  const context={exports:{},Date,Intl,URL,URLSearchParams,TextDecoder,Uint8Array,AbortSignal,Error,Number,Object,Array,String,Set,
     fetch:async(url,options)=>{calls.push({url,options});return fetchImpl(url,options);}};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/news.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,context);
   return {...context.exports,calls,values,context,storage:{get:async key=>values.get(key),put:async(key,value)=>values.set(key,value)}};
@@ -72,4 +72,31 @@ test('an aborted source uses one shared bounded request signal and records timeo
   const result=await s.lookupNews(s.storage,1027,'ETH',now);
   assert.equal(result.failure,'timeout'); assert.equal(result.status,'unavailable');
   assert.equal(JSON.stringify(result).includes('SECRET'),false);
+});
+const headline=(title,publisher='CoinDesk',domain='https://www.coindesk.com',released=date)=>`<item><title>${title}</title><link>https://news.google.com/rss/articles/example?oc=5</link><pubDate>${released}</pubDate><source url="${domain}">${publisher}</source></item>`;
+test('press search works for assets outside the four-source catalog and labels content as unverified',async()=>{
+ const s=setup(()=>new Response(rss(headline('NEAR Protocol launches a network upgrade'))));
+ const result=await s.lookupCandidateNews(s.storage,6535,'NEAR','NEAR Protocol',now);
+ assert.equal(result.status,'recent_publication');assert.equal(result.official_status,'unsupported');assert.equal(result.press,true);
+ assert.equal(result.publication.publisher,'CoinDesk');assert.equal(s.calls.length,1);
+ assert.ok(new URL(s.calls[0].url).searchParams.get('q').includes('"NEAR Protocol"'));
+ assert.ok(s.newsMessage(result).includes('contenu non'));assert.equal(s.calls[0].options.headers.Authorization,undefined);
+ assert.equal(s.calls[0].options.headers['X-CMC_PRO_API_KEY'],undefined);
+ await s.lookupCandidateNews(s.storage,6535,'NEAR','NEAR Protocol',now+15*60000);assert.equal(s.calls.length,1);
+});
+test('press rejects promotional headlines, ticker-only matches and mismatched publisher/domain',()=>{
+ const s=setup(()=>{});
+ const rows=rss(headline('NEAR Protocol best crypto to buy now')+headline('NEAR hits record, unrelated ticker')
+  +headline('NEAR Protocol upgrade','CoinDesk','https://evil.example')+headline('NEAR Protocol upgrade','Unknown','https://www.coindesk.com')
+  +headline('NEAR Protocol upgrade','CoinDesk','https://secret@www.coindesk.com')+headline('NEAR Protocol releases new mainnet software'));
+ const parsed=s.parseHeadlines(rows,'NEAR Protocol');assert.equal(parsed.inspected,6);assert.equal(parsed.items.length,1);
+ assert.ok(parsed.items[0].title.includes('mainnet'));assert.ok(!parsed.items[0].url.includes('?'));
+});
+test('press distinguishes no recent result from source failure and never substitutes a future or undated article',async()=>{
+ const empty=setup(()=>new Response(rss(headline('Raydium upgrade','CoinDesk',undefined,'2026-10-08T00:00:00Z')+headline('Raydium upgrade','CoinDesk',undefined,'invalid'))));
+ assert.equal((await empty.lookupHeadlines(empty.storage,8526,'RAY','Raydium',now)).status,'no_recent_publication');
+ const failed=setup(()=>{throw new Error('SECRET_SOURCE');});
+ const result=await failed.lookupCandidateNews(failed.storage,8526,'RAY','Raydium',now);
+ assert.equal(result.status,'unavailable');assert.equal(JSON.stringify(result).includes('SECRET'),false);
+ await failed.lookupCandidateNews(failed.storage,8526,'RAY','Raydium',now+15*60000);assert.equal(failed.calls.length,1);
 });

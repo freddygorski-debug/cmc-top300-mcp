@@ -7,8 +7,8 @@ export const NEWS_SOURCES: readonly NewsSource[] = [
   { id: 4847, symbol: "STX", name: "Stacks (blog agrégateur de l’écosystème)", url: "https://www.stacks.co/blog/rss.xml", hosts: ["www.stacks.co"], prefix: "/blog/", format: "rss", aggregator: true },
 ];
 export const NEWS_POLICY = { recentMs: 72 * 3600000, cacheMs: 3600000, timeoutMs: 3000, maxBytes: 1000000, maxItems: 30, detailPages: 2 } as const;
-export type Publication = { title: string; url: string; published_at: string };
-export type NewsEvidence = { status: "recent_publication" | "no_recent_publication" | "unavailable" | "unsupported"; checked_at: string; source?: string; aggregator?: boolean; publication?: Publication; inspected?: number; limit?: number; failure?: "timeout" | "request" | "format" };
+export type Publication = { title: string; url: string; published_at: string; publisher?: string };
+export type NewsEvidence = { status: "recent_publication" | "no_recent_publication" | "unavailable" | "unsupported"; checked_at: string; source?: string; aggregator?: boolean; press?: boolean; publication?: Publication; inspected?: number; limit?: number; official_status?: string; press_status?: string; failure?: "timeout" | "request" | "format" };
 type NewsStorage = { get<T>(key: string): Promise<T | undefined>; put(key: string, value: unknown): Promise<unknown> };
 
 function decodeNewsText(raw: string): string {
@@ -113,11 +113,66 @@ export async function lookupNews(storage: NewsStorage, id: number, symbol: strin
   await storage.put(key,result);
   return result;
 }
+// Google News is a discovery index, not an official announcement or content verifier.
+// Its source URL/name must match; the resulting article is still only relayed evidence.
+const PRESS_DOMAINS:Record<string,string>={"coindesk.com":"CoinDesk","cointelegraph.com":"Cointelegraph","decrypt.co":"Decrypt","theblock.co":"The Block","blockworks.co":"Blockworks","cryptoslate.com":"CryptoSlate","reuters.com":"Reuters","bloomberg.com":"Bloomberg","cnbc.com":"CNBC","ft.com":"Financial Times","fortune.com":"Fortune","thedefiant.io":"The Defiant","beincrypto.com":"BeInCrypto","theguardian.com":"The Guardian"};
+export function parseHeadlines(text:string,name:string):{items:Publication[];inspected:number} {
+  if (!/<rss\b/i.test(text) || !/<\/rss>\s*$/i.test(text) || /<!DOCTYPE|<!ENTITY/i.test(text)) throw new Error("Invalid headline feed");
+  const rows=[...text.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/gi)].slice(0,NEWS_POLICY.maxItems);
+  const items:Publication[]=[];
+  const normalized=(value:string)=>value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu," ").trim();
+  const assetName=normalized(name);
+  for (const row of rows) {
+    const field=(tag:string)=>row[1].match(new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`,"i"))?.[1]??"";
+    const title=decodeNewsText(field("title")), released=Date.parse(field("pubDate"));
+    // Full asset-name phrase, not a common ticker such as ATH, NEAR or RAY.
+    if (!(" "+normalized(title)+" ").includes(" "+assetName+" ") || !Number.isFinite(released)
+      || /presale|pre-sale|price prediction|price forecast|best crypto|buy now|\b\d+x\b|sponsored|paid content/i.test(title)) continue;
+    const publisher=row[1].match(/<source\b[^>]*url=["']([^"']+)["'][^>]*>([\s\S]*?)<\/source>/i);
+    if (!publisher) continue;
+    try {
+      const origin=new URL(decodeNewsText(publisher[1])), article=new URL(decodeNewsText(field("link")));
+      const label=PRESS_DOMAINS[origin.hostname.replace(/^www\./,"")];
+      if (!label || origin.protocol!=="https:" || origin.username || origin.password || origin.port
+        || decodeNewsText(publisher[2]).toLowerCase()!==label.toLowerCase()
+        || article.protocol!=="https:" || article.hostname!=="news.google.com" || article.username || article.password || article.port
+        || !article.pathname.startsWith("/rss/articles/") || article.href.length>1500
+        || [...article.searchParams.keys()].some(key=>key!=="oc")) continue;
+      article.search=""; article.hash="";
+      items.push({title:title.slice(0,160),url:article.toString(),published_at:new Date(released).toISOString(),publisher:label});
+    } catch { /* Unverified publisher/link remains excluded. */ }
+  }
+  return {items,inspected:rows.length};
+}
+export async function lookupHeadlines(storage:NewsStorage,id:number,symbol:string,name:unknown,now:number):Promise<NewsEvidence> {
+  const checked_at=new Date(now).toISOString(),source="Google News (presse relayée, contenu non vérifié)";
+  if (!Number.isSafeInteger(id) || id<=0 || typeof name!=="string" || name.trim().length<2 || name.length>100
+    || /[\u0000-\u001f\u007f"<>]/.test(name)) return {status:"unsupported",checked_at};
+  const key=`press:${id}`, cached=await storage.get<NewsEvidence & {asset_name:string;asset_symbol:string}>(key);
+  if (cached && cached.asset_name===name && cached.asset_symbol===symbol && now-Date.parse(cached.checked_at)>=0 && now-Date.parse(cached.checked_at)<NEWS_POLICY.cacheMs) {
+    if (cached.publication && now-Date.parse(cached.publication.published_at)>NEWS_POLICY.recentMs) return {...cached,status:"no_recent_publication",publication:undefined};
+    return cached;
+  }
+  const query=new URLSearchParams({q:`"${name.trim()}" cryptocurrency when:3d`,hl:"en-US",gl:"US",ceid:"US:en"});
+  const signal=AbortSignal.timeout(NEWS_POLICY.timeoutMs); let result:NewsEvidence;
+  try {
+    const parsed=parseHeadlines(await newsDocument(`https://news.google.com/rss/search?${query}`,signal),name);
+    const recent=parsed.items.filter(x=>Date.parse(x.published_at)<=now && now-Date.parse(x.published_at)<=NEWS_POLICY.recentMs)
+      .sort((a,b)=>Date.parse(b.published_at)-Date.parse(a.published_at))[0];
+    result={status:recent?"recent_publication":"no_recent_publication",checked_at,source,aggregator:true,press:true,publication:recent,inspected:parsed.inspected,limit:NEWS_POLICY.maxItems};
+  } catch { result={status:"unavailable",checked_at,source,press:true,failure:signal.aborted?"timeout":"request"}; }
+  await storage.put(key,{...result,asset_name:name,asset_symbol:symbol}); return result;
+}
+export async function lookupCandidateNews(storage:NewsStorage,id:number,symbol:string,name:unknown,now:number):Promise<NewsEvidence> {
+  const [official,press]=await Promise.all([lookupNews(storage,id,symbol,now),lookupHeadlines(storage,id,symbol,name,now)]);
+  const chosen=official.status==="recent_publication"?official:press.status!=="unsupported"?press:official;
+  return {...chosen,official_status:official.status,press_status:press.status};
+}
 export function newsMessage(evidence: NewsEvidence): string {
   const p=evidence.publication;
   if (evidence.status === "recent_publication" && p) {
     const day=new Intl.DateTimeFormat("fr-FR",{timeZone:"Europe/Paris",dateStyle:"short"}).format(new Date(p.published_at));
-    return `Actualité : ${p.title} (${day}, ${evidence.source}). ${p.url}\nLien avec la hausse non établi ; publication ${evidence.aggregator?"relayée par l’écosystème":"sur une source officielle"}, pas une confirmation d’achat.`;
+    return `Actualité : ${p.title} (${day}, ${p.publisher??evidence.source}). ${p.url}\nLien avec la hausse non établi ; ${evidence.press?"article repéré via Google News, contenu non vérifié":evidence.aggregator?"publication relayée par l’écosystème":"publication sur une source officielle"}, pas une confirmation d’achat.`;
   }
   if (evidence.status === "no_recent_publication") return `Catalyseur : aucun récent vérifié dans les publications consultées (${evidence.source}, ${evidence.inspected} articles, fenêtre 72 h).`;
   if (evidence.status === "unavailable") return `Catalyseur : recherche indisponible (${evidence.source}) ; non vérifié.`;

@@ -1,7 +1,7 @@
 import { sendTelegram, type TelegramEnv } from "./telegram";
 import { DurableObject } from "cloudflare:workers";
 import { evaluateEntry, entryOutcome, type EntryPlan } from "./entry";
-import { lookupNews, newsMessage, type NewsEvidence } from "./news";
+import { lookupCandidateNews, newsMessage, type NewsEvidence } from "./news";
 
 type ScanEnv = TelegramEnv & { AUTO_SCAN_ENABLED?: string; ENTRY_ALERTS_ENABLED?: string; CMC_API_KEY?: string };
 type Followed = { id: number; symbol: string; plan: EntryPlan; notified: boolean; mode: "live" | "paper"; checked_at?: string };
@@ -13,6 +13,11 @@ class ScanRequestError extends Error {
 }
 function usd(quote: any) {
   return Array.isArray(quote) ? quote.find((q: any) => q.symbol === "USD" || q.currency === "USD" || q.name === "USD") : quote?.USD;
+}
+export function entryAlertsAllowed(at: number): boolean {
+  if (!Number.isFinite(at)) return false;
+  const hour=Number(new Intl.DateTimeFormat("en-GB",{timeZone:"Europe/Paris",hour:"2-digit",hourCycle:"h23"}).format(new Date(at)));
+  return hour>=9 && hour<23;
 }
 
 export class ObservationScanner extends DurableObject<ScanEnv> {
@@ -103,7 +108,7 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
       // Optional publication requests run alongside CMC history, not after the final quote.
       // A missing/slow source never blocks a price-qualified occasion.
       const newsBatch=Promise.all(candidates.map(async (a:any)=> {
-        try { return {id:a.id,evidence:await lookupNews(this.ctx.storage,a.id,a.symbol,now)}; }
+        try { return {id:a.id,evidence:await lookupCandidateNews(this.ctx.storage,a.id,a.symbol,a.name,now)}; }
         catch { return {id:a.id,evidence:{status:"unavailable",checked_at:new Date(now).toISOString()} as NewsEvidence}; }
       }));
       const history = await get(`/v3/cryptocurrency/quotes/historical?id=${candidates.map((a: any) => a.id).join(",")}&convert=USD&interval=15m&time_start=${Math.floor((now - 6 * 3600_000) / 1000)}&time_end=${Math.floor(now / 1000)}`);
@@ -178,11 +183,16 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
         if (decision.metrics && Number(decision.metrics.change1h)>0) radar[a.id]=now;
         decisions.push({id:a.id,symbol:a.symbol,points:points.length,history_age_minutes:points.length?Math.round((now-Date.parse(points.at(-1)!.timestamp))/60000):null,pattern:plan?.pattern??null,qualified:!!plan,reason:decision.reason,metrics:decision.metrics,context,news_status:news.status,news_source:news.source??null});
         if (!plan) continue;
+        // Keep overnight analysis/radar, but never queue an entry for the morning.
+        if (mode === "live" && !entryAlertsAllowed(Date.now())) {
+          await audit({id:a.id,mode,outcome:"quiet_hours"}); continue;
+        }
         const key = mode === "live" ? `last:${a.id}` : `paper_last:${a.id}`;
         const last = await this.ctx.storage.get<number>(key);
         if (last !== undefined && now - last < 2 * 3600_000) continue;
         const setupKey=`${mode}:setup:${a.id}`;
-        if (await this.ctx.storage.get<string>(setupKey)===plan.setup_at) { await audit({id:a.id,mode,outcome:"duplicate_setup"}); continue; }
+        const previousSetup=await this.ctx.storage.get<string>(setupKey);
+        if (previousSetup===plan.setup_at) { await audit({id:a.id,mode,outcome:"duplicate_setup"}); continue; }
         // Re-read selected quotes immediately before dispatch, after history work.
         if (freshToday>=10) { await audit({id:a.id,mode,outcome:"fresh_quote_budget"}); continue; }
         await this.ctx.storage.put("fresh_daily",{day,count:++freshToday});
@@ -201,6 +211,9 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
         plan.observed_at=new Date(Date.now()).toISOString();
         plan.valid_until=new Date(Date.now()+15*60000).toISOString();
         await audit({id:a.id,mode,outcome:"pre_send_verified",quote_at:current.last_updated,price:current.price});
+        if (mode === "live" && !entryAlertsAllowed(Date.now())) {
+          await audit({id:a.id,mode,outcome:"quiet_hours"}); continue;
+        }
         // Reserve before sending, including uncertain deliveries.
         await this.ctx.storage.put({ [key]: now, [setupKey]: plan.setup_at, [dailyKey]: { day, count: ++sentToday } });
         attempts++;
@@ -211,7 +224,18 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
         const n=(v:number)=>Number(v.toPrecision(8)).toString();
         const when=(iso:string)=>new Intl.DateTimeFormat("fr-FR",{timeZone:"Europe/Paris",dateStyle:"short",timeStyle:"short"}).format(new Date(iso))+" (Paris)";
         const relative=Number.isFinite(current.percent_change_1h) && Number.isFinite(marketSummary.btc1h) && marketSummary.btc1h!==null ? n(current.percent_change_1h-marketSummary.btc1h)+" points vs BTC (variations CMC 1 h)" : "indisponible";
-        const delivered = mode === "live" && await sendTelegram(this.env, `🚨 ENTRÉE POTENTIELLE\n\nCrypto : ${a.symbol}\nDonnées : ${when(plan.quote_at)}, CMC / USD\nZone CMC : ${n(plan.min)} – ${n(plan.max)} USD\nObjectif CMC : ${n(plan.target)} USD (+2,55 % depuis le haut de zone)\nPrix maximal acceptable CMC : ${n(plan.max)} USD\nInvalidation : ${n(plan.stop)} USD (${n((1-plan.stop/plan.max)*100)} % sous le haut de zone)\nEntrée valable jusqu’à : ${when(plan.valid_until)}\nSuivi : réévaluation silencieuse, sans expiration automatique à 4 h\nMotif : ${plan.pattern === "pullback" ? "Début de reprise après repli ; potentiel mesuré sur historique échantillonné, non garanti." : "Cassure ou continuation locale avec contexte 4 h ; confirmation complète non exigée."}\nRisque principal : prix échantillonnés ; retournement entre deux mesures possible.\n${newsMessage(news)}\nForce relative : ${relative}.\nVolumes courts et cotations Neverless indisponibles.\nAvant achat : vérifier disponibilité et prix achat/vente Neverless ; abandonner hors zone ou si spread > 0,5 %. Objectif estimé 2 % net sous cette hypothèse, non garanti. Prix CMC non exécutables ; aucun achat automatique.`);
+        const message = `🚨 ENTRÉE POTENTIELLE\n\nCrypto : ${a.symbol}\nDonnées : ${when(plan.quote_at)}, CMC / USD\nZone CMC : ${n(plan.min)} – ${n(plan.max)} USD\nObjectif CMC : ${n(plan.target)} USD (+2,55 % depuis le haut de zone)\nPrix maximal acceptable CMC : ${n(plan.max)} USD\nInvalidation : ${n(plan.stop)} USD (${n((1-plan.stop/plan.max)*100)} % sous le haut de zone)\nEntrée valable jusqu’à : ${when(plan.valid_until)}\nSuivi : réévaluation silencieuse, sans expiration automatique à 4 h\nMotif : ${plan.pattern === "pullback" ? "Début de reprise après repli ; potentiel mesuré sur historique échantillonné, non garanti." : "Cassure ou continuation locale avec contexte 4 h ; confirmation complète non exigée."}\nRisque principal : prix échantillonnés ; retournement entre deux mesures possible.\n${newsMessage(news)}\nForce relative : ${relative}.\nVolumes courts et cotations Neverless indisponibles.\nAvant achat : vérifier disponibilité et prix achat/vente Neverless ; abandonner hors zone ou si spread > 0,5 %. Objectif estimé 2 % net sous cette hypothèse, non garanti. Prix CMC non exécutables ; aucun achat automatique.`;
+        // Storage awaits may cross 23:00. No network send has happened yet: undo
+        // this reservation so a fresh morning decision is not treated as a duplicate.
+        if (mode === "live" && !entryAlertsAllowed(Date.now())) {
+          followed=followed.filter(f=>f!==entry);
+          await this.ctx.storage.put("entries",followed);
+          await this.ctx.storage.put(dailyKey,{day,count:--sentToday}); attempts--;
+          if (last===undefined) await this.ctx.storage.delete(key); else await this.ctx.storage.put(key,last);
+          if (previousSetup===undefined) await this.ctx.storage.delete(setupKey); else await this.ctx.storage.put(setupKey,previousSetup);
+          await audit({id:a.id,mode,outcome:"quiet_hours"}); continue;
+        }
+        const delivered = mode === "live" && await sendTelegram(this.env, message);
         entry.notified=delivered;
         await this.ctx.storage.put("entries",followed);
         await audit({id:a.id,mode,outcome:"entry_delivery",sent:delivered});
