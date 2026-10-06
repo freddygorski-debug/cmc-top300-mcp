@@ -6,20 +6,21 @@ const ts = require('typescript');
 function setup(enabled = true, live = true) {
   const now = Date.now();
   const storage = new Map(); const calls = []; const messages = []; const logs = [];
-  const prices = [98,97,100,102,98,101,104,103,102,101,100,100.5];
-  const points = prices.map((price, i) => ({ timestamp: new Date(now - (11-i)*900000).toISOString(), price }));
+  const prices = [98,99,98,100,101,104,99,99,99,99.5,100,99.9,99.8,100,100.1,100,100.5];
+  const points = prices.map((price, i) => ({ timestamp: new Date(now - (prices.length-1-i)*900000).toISOString(), price }));
   const ctx = { storage: { get: async key => storage.get(key), put: async (key, value) => {
     if (typeof key === 'string') storage.set(key, value); else Object.entries(key).forEach(([k,v])=>storage.set(k,v));
   } } };
   const env = { AUTO_SCAN_ENABLED: enabled ? 'true' : undefined, ENTRY_ALERTS_ENABLED: live ? 'true' : undefined, CMC_API_KEY: 'fake', TELEGRAM_BOT_TOKEN: 'fake', TELEGRAM_CHAT_ID: '1' };
   const listing = { id: 1, symbol: 'BTC', cmc_rank: 1, tags: [], quote: { USD: { price: 100.5, percent_change_1h: 2, volume_change_24h: 20, volume_24h: 10000000, last_updated: new Date(now).toISOString() } } };
   const context = { exports: {}, Date, AbortSignal, Number, Object, Error, Promise,
+    Intl, URL, TextDecoder, Uint8Array,
     console: { log: text => logs.push(JSON.parse(text)) },
     DurableObject: class { constructor(ctx, env) { this.ctx = ctx; this.env = env; } },
     sendTelegram: async (env, text) => { messages.push(text); return true; },
-    fetch: async url => { calls.push(url); return { ok: true, json: async () => ({ status: {error_code:0}, data: url.includes('listings') ? [listing] : { 1: { id: 1, quotes: points.map(x => ({ timestamp:x.timestamp, quote:{USD:{price:x.price}} })) } } }) }; },
+    fetch: async url => { calls.push(url); return { ok: true, json: async () => ({ status: {error_code:0}, data: url.includes('listings') ? [listing] : url.includes('quotes/latest') ? {1:listing} : { 1: { id: 1, quotes: points.map(x => ({ timestamp:x.timestamp, quote:{USD:{price:x.price}} })) } } }) }; },
   };
-  const source = (fs.readFileSync('src/entry.ts','utf8')+'\n'+fs.readFileSync('src/observation.ts','utf8')).replace(/^import .*;\r?\n/gm,'');
+  const source = (fs.readFileSync('src/entry.ts','utf8')+'\n'+fs.readFileSync('src/news.ts','utf8')+'\n'+fs.readFileSync('src/observation.ts','utf8')).replace(/^import .*;\r?\n/gm,'');
   vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,context);
   return { ...context.exports, scanner: new context.exports.ObservationScanner(ctx, env), now, storage, calls, messages, points, listing, logs,
     mapResponse: transform => { const original = context.fetch; context.fetch = async url => { const response = await original(url); const body = await response.json(); return { ...response, json: async () => transform(body) }; }; },
@@ -44,11 +45,11 @@ test('delayed samples allow a bounded live move, but not a chased or falling ent
   assert.equal(s.entryPlan(points,101.4,at,s.now),null);
   assert.equal(s.entryPlan(points,100.1,at,s.now),null);
 });
-test('early consolidation breakout qualifies independently of pullback target room', () => {
+test('local breakout with nearby resistance is rejected', () => {
   const s=setup(), prices=[98,97,100,102,98,101,103,101.5,101,102,101.3,102.3];
-  const points=s.points.map((x,i)=>({...x,price:prices[i]})),at=new Date(s.now).toISOString();
+  const points=s.points.slice(-12).map((x,i)=>({...x,price:prices[i]})),at=new Date(s.now).toISOString();
   const plan=s.entryPlan(points,102.3,at,s.now);
-  assert.ok(plan); assert.equal(plan.pattern,'breakout');
+  assert.equal(plan,null); // Missing four-hour context cannot establish an entry.
   assert.equal(s.entryPlan(points,103.5,at,s.now),null);
   const flat=points.map(x=>({...x,price:102})); assert.equal(s.entryPlan(flat,102,at,s.now),null);
 });
@@ -64,7 +65,7 @@ test('disabled scanner makes no requests; enabled scanner serializes duplicate c
   const off=setup(false); await off.scanner.run(Math.floor(off.now/900000)); assert.equal(off.calls.length,0);
   const s=setup(); const slot=Math.floor(s.now/900000);
   await Promise.all([s.scanner.run(slot),s.scanner.run(slot)]);
-  assert.equal(s.calls.length,2); assert.equal(s.messages.length,1);
+  assert.equal(s.calls.length,3); assert.equal(s.messages.length,1);
   await s.scanner.run(slot+1); assert.equal(s.messages.length,1);
   assert.equal(s.storage.get('daily').count,1);
 });
@@ -84,7 +85,7 @@ test('diagnostics distinguish no candidates and confirmed or uncertain Telegram 
   const empty=setup(); empty.listing.tags=['stablecoin']; await empty.scanner.run(Math.floor(empty.now/900000));
   assert.equal(empty.storage.get('status').outcome,'no_candidates');
   const good=setup(); await good.scanner.run(Math.floor(good.now/900000));
-  assert.equal(good.storage.get('status').sent,1); assert.equal(good.storage.get('status').outcome,'sent');
+  assert.ok(good.messages[0].includes('ENTR\u00c9E POTENTIELLE')); assert.equal(good.storage.get('status').sent,1); assert.equal(good.storage.get('status').outcome,'sent');
   const bad=setup(); bad.failSend(); await bad.scanner.run(Math.floor(bad.now/900000));
   assert.equal(bad.storage.get('status').sent,0); assert.equal(bad.storage.get('status').ok,false);
   assert.equal(bad.storage.get('status').outcome,'delivery_unconfirmed');
@@ -138,14 +139,14 @@ test('paper mode persists audit and follows opportunities without Telegram messa
   assert.equal(s.storage.get('entries').length,1); assert.ok(s.storage.get('entry_audit').length);
 });
 
-test('outcomes follow chronological observations, expire at four hours and fail on gaps', () => {
+test('outcomes follow chronological observations, continue beyond four hours for v3 and fail on gaps', () => {
   const s=setup(), at=new Date(s.now).toISOString(), plan=s.entryPlan(s.points,100.5,at,s.now);
   const t=s.now+900000, time=new Date(t).toISOString();
   assert.equal(s.entryOutcome(plan,[{timestamp:time,price:plan.stop-0.1}],plan.target+1,time,t),'invalidated');
   assert.equal(s.entryOutcome(plan,[],plan.target+0.1,time,t),'target');
   assert.equal(s.entryOutcome(plan,[],100.5,new Date(s.now+3600000).toISOString(),s.now+3600000),'data_unavailable');
   const future=Array.from({length:16},(_,i)=>({timestamp:new Date(s.now+(i+1)*900000).toISOString(),price:100.5}));
-  assert.equal(s.entryOutcome(plan,future,100.5,future[15].timestamp,s.now+4*3600000),'expired');
+  assert.equal(s.entryOutcome(plan,future,100.5,future[15].timestamp,s.now+4*3600000),null);
 });
 
 test('active opportunities remain followed after leaving screening and close only once', async () => {
@@ -153,7 +154,96 @@ test('active opportunities remain followed after leaving screening and close onl
   const f=s.storage.get('entries')[0]; f.plan.stop=101;
   s.listing.quote.USD.percent_change_1h=-2;
   await s.restart().run(slot+1);
-  assert.equal(s.messages.length,2); assert.equal(s.storage.get('entries').length,0);
-  await s.restart().run(slot+1); assert.equal(s.messages.length,2);
+  assert.equal(s.messages.length,1); assert.equal(s.storage.get('entries').length,0);
+  await s.restart().run(slot+1); assert.equal(s.messages.length,1);
 });
 
+
+test('v3 explains fading price, weak context and volume instead of notifying', () => {
+  const s=setup(), at=new Date(s.now).toISOString();
+  assert.equal(s.evaluateEntry(s.points,100.4,at,s.now).reason,'live_price_fading');
+  assert.equal(s.evaluateEntry(s.points,100.5,at,s.now,{volumeChange24h:-34}).reason,'declining_rolling_volume');
+  assert.equal(s.evaluateEntry(s.points.map((x,i)=>({...x,price:i===0?100.5:x.price})),100.5,at,s.now,{change24h:-4}).reason,'weak_broader_structure');
+});
+test('strong hourly movers are no longer excluded by the former four-percent cap', async () => {
+  const s=setup(); s.listing.quote.USD.percent_change_1h=5.5;
+  await s.scanner.run(Math.floor(s.now/900000)); assert.equal(s.storage.get('status').eligible,1);
+});
+test('quote deterioration immediately before send suppresses entry without reserving a send', async () => {
+  const s=setup(); s.mapResponse(body=>body.data?.[1]?.symbol ? {...body,data:{1:{...s.listing,quote:{USD:{...s.listing.quote.USD,price:100.4}}}}}:body);
+  await s.scanner.run(Math.floor(s.now/900000));
+  assert.equal(s.messages.length,0); assert.equal(s.storage.get('daily'),undefined);
+  assert.ok(s.storage.get('entry_audit').some(x=>x.outcome==='pre_send_rejected'));
+});
+test('checkpoint lets a v3 scenario survive beyond a rolling history window', () => {
+  const s=setup(),at=new Date(s.now).toISOString(),plan=s.entryPlan(s.points,100.5,at,s.now);
+  const now=s.now+25*3600000,checkpoint=new Date(now-15*60000).toISOString();
+  assert.equal(s.entryOutcome({...plan,quote_at:checkpoint},[],100.5,new Date(now).toISOString(),now),null);
+});
+
+test('fresh quote budget is persistent even when entries are rejected', async () => {
+ const s=setup(); s.storage.set('fresh_daily',{day:new Date(s.now).toISOString().slice(0,10),count:10});
+ await s.scanner.run(Math.floor(s.now/900000));
+ assert.equal(s.calls.length,2); assert.equal(s.messages.length,0);
+ assert.equal(s.storage.get('fresh_daily').count,10);
+});
+
+test('same sampled setup does not send again after closure and cooldown', async () => {
+ const s=setup(),slot=Math.floor(s.now/900000); await s.scanner.run(slot);
+ assert.equal(s.messages.length,1);
+ s.storage.set('entries',[]); s.storage.set('last:1',s.now-3*3600000);
+ await s.restart().run(slot+1);
+ assert.equal(s.messages.length,1);
+ assert.ok(s.storage.get('entry_audit').some(x=>x.outcome==='duplicate_setup'));
+});
+
+test('optional publication lookup enriches a single entry or fails without blocking it; dispatch quote is last',async()=>{
+ for (const available of [true,false]) {
+  const s=setup(); s.listing.id=20947; s.listing.symbol='SUI'; let newsSettled=false;
+  s.setFetch(async url=>{
+   s.calls.push(url);
+   if (url.startsWith('https://www.sui.io/')) {
+    await Promise.resolve(); newsSettled=true;
+    if (!available) throw new Error('SECRET_SOURCE_ERROR');
+    return new Response(`<rss><channel><item><title>Network launch</title><link>https://www.sui.io/blog/network-launch</link><pubDate>${new Date(s.now).toISOString()}</pubDate></item></channel></rss>`);
+   }
+   if (url.includes('quotes/latest')) assert.equal(newsSettled,true);
+   const data=url.includes('listings')?[s.listing]:url.includes('quotes/latest')?{20947:s.listing}:{20947:{id:20947,quotes:s.points.map(x=>({timestamp:x.timestamp,quote:{USD:{price:x.price}}}))}};
+   return {ok:true,json:async()=>({data})};
+  });
+  await s.scanner.run(Math.floor(s.now/900000));
+  assert.equal(s.messages.length,1); assert.ok(s.calls.at(-1).includes('quotes/latest'));
+  assert.ok(s.messages[0].includes(available?'Network launch':'recherche indisponible'));
+  assert.equal(JSON.stringify(s.logs).includes('SECRET'),false);
+  const evidence=s.storage.get('scan_evidence')[0].assets[0];
+  assert.equal(evidence.points.length,17); assert.equal(evidence.dispatch_quote.price,100.5);
+  assert.equal(evidence.news.status,available?'recent_publication':'unavailable');
+ }
+});
+test('a fresh deterioration in rolling volume cancels dispatch even at an unchanged price',async()=>{
+ const s=setup(); s.mapResponse(body=>body.data?.[1]?.symbol?{...body,data:{1:{...s.listing,quote:{USD:{...s.listing.quote.USD,volume_change_24h:-40}}}}}:body);
+ await s.scanner.run(Math.floor(s.now/900000));
+ assert.equal(s.messages.length,0); assert.equal(s.storage.get('daily'),undefined);
+ assert.ok(s.storage.get('entry_audit').some(x=>x.outcome==='pre_send_rejected' && x.reason==='declining_rolling_volume'));
+});
+test('evidence snapshots are bounded and distinguish actual history coverage from the universe',async()=>{
+ const s=setup();s.storage.set('scan_evidence',Array.from({length:24},(_,i)=>({at:i})));
+ await s.scanner.run(Math.floor(s.now/900000));
+ const evidence=s.storage.get('scan_evidence');assert.equal(evidence.length,24);
+ const latest=evidence.at(-1);assert.equal(latest.universe,1);assert.equal(latest.assets.length,1);
+ assert.equal(latest.assets[0].quote.price,100.5);assert.equal(latest.decisions[0].reason,'qualified');
+ assert.equal(latest.market.coverage,1);assert.equal(latest.market.positive,1);
+ assert.equal(JSON.stringify(latest).includes('fake'),false);
+});
+test('dispatch network failure preserves the observed inputs without reserving or leaking an entry',async()=>{
+ const s=setup();s.setFetch(async url=>{
+  if(url.includes('quotes/latest')) throw new Error('SECRET_REQUEST_FAILURE');
+  const data=url.includes('listings')?[s.listing]:{1:{id:1,quotes:s.points.map(x=>({timestamp:x.timestamp,quote:{USD:{price:x.price}}}))}};
+  return {ok:true,json:async()=>({data})};
+ });
+ await s.scanner.run(Math.floor(s.now/900000));
+ assert.equal(s.messages.length,0);assert.equal(s.storage.get('daily'),undefined);
+ const snapshot=s.storage.get('scan_evidence')[0];assert.equal(snapshot.assets[0].points.length,17);
+ assert.equal(snapshot.failure.stage,'delivery');assert.equal(snapshot.failure.kind,'network');
+ assert.equal(JSON.stringify(s.logs).includes('SECRET'),false);assert.equal(JSON.stringify(snapshot).includes('SECRET'),false);
+});
