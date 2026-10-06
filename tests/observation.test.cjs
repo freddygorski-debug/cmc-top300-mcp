@@ -84,7 +84,7 @@ test('diagnostics distinguish no candidates and confirmed or uncertain Telegram 
   const empty=setup(); empty.listing.tags=['stablecoin']; await empty.scanner.run(Math.floor(empty.now/900000));
   assert.equal(empty.storage.get('status').outcome,'no_candidates');
   const good=setup(); await good.scanner.run(Math.floor(good.now/900000));
-  assert.equal(good.storage.get('status').sent,1); assert.equal(good.storage.get('status').outcome,'sent');
+  assert.ok(good.messages[0].includes('ENTR\u00c9E POTENTIELLE')); assert.equal(good.storage.get('status').sent,1); assert.equal(good.storage.get('status').outcome,'sent');
   const bad=setup(); bad.failSend(); await bad.scanner.run(Math.floor(bad.now/900000));
   assert.equal(bad.storage.get('status').sent,0); assert.equal(bad.storage.get('status').ok,false);
   assert.equal(bad.storage.get('status').outcome,'delivery_unconfirmed');
