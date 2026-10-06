@@ -1,5 +1,5 @@
 type ListingObservation = { price: number; at: number; delta: number | null };
-export function selectEntryCandidates(assets: any[], followed: {id:number;symbol:string}[], previous: Record<string,ListingObservation>, radar: Record<string,number>, cursor: number, now: number) {
+export function selectEntryCandidates(assets: any[], previous: Record<string,ListingObservation>, radar: Record<string,number>, cursor: number, now: number) {
   const observations:Record<string,ListingObservation>={}, rows:Record<string,unknown>[]=[], eligible:any[]=[];
   for (const a of assets) {
     const q=a.quote?.USD, at=Date.parse(q?.last_updated), old=previous[a.id];
@@ -17,7 +17,6 @@ export function selectEntryCandidates(assets: any[], followed: {id:number;symbol
     if (!a || chosen.length>=10 || chosen.some(x=>x.id===a.id)) return false;
     chosen.push(a); const row=rows.find(x=>x.id===a.id); if (row) row.selection=reason; return true;
   };
-  for (const f of followed) add(assets.find(a=>a.id===f.id)??{id:f.id,symbol:f.symbol,quote:{USD:null}},"existing_follow");
   // Four rotating places guarantee exploration instead of a strongest-hour monopoly.
   const start=cursor%Math.max(1,eligible.length), rotated=eligible.slice(start).concat(eligible.slice(0,start));
   let explored=0, advanced=0;
@@ -31,5 +30,5 @@ export function selectEntryCandidates(assets: any[], followed: {id:number;symbol
   for (const a of early) { if (chosen.length>=8) break; add(a,"recent_recovery_priority"); }
   for (const a of eligible.filter(a=>radar[a.id] && now-radar[a.id]<4*3600000)) add(a,"silent_radar");
   for (const a of rotated) add(a,"rotation_fill");
-  return {candidates:chosen,eligible,observations,selection:rows,nextCursor:cursor+Math.max(1,advanced),newCandidates:chosen.filter(a=>!followed.some(f=>f.id===a.id)).length};
+  return {candidates:chosen,eligible,observations,selection:rows,nextCursor:cursor+Math.max(1,advanced),newCandidates:chosen.length};
 }

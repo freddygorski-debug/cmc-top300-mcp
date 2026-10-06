@@ -1,11 +1,10 @@
 import { sendTelegram, type TelegramEnv } from "./telegram";
 import { DurableObject } from "cloudflare:workers";
-import { evaluateEntry, entryOutcome, type EntryPlan } from "./entry";
+import { evaluateEntry } from "./entry";
 import { lookupCandidateNews, newsMessage, type NewsEvidence } from "./news";
 import { selectEntryCandidates } from "./selection";
 
 type ScanEnv = TelegramEnv & { AUTO_SCAN_ENABLED?: string; ENTRY_ALERTS_ENABLED?: string; CMC_API_KEY?: string };
-type Followed = { id: number; symbol: string; plan: EntryPlan; notified: boolean; mode: "live" | "paper"; checked_at?: string };
 type Point = { timestamp: string; price: number };
 class ScanRequestError extends Error {
   constructor(readonly kind: "timeout" | "network" | "http" | "api" | "invalid_response", readonly code?: number) {
@@ -77,11 +76,15 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
     try {
       const listings = await get("/v3/cryptocurrency/listings/latest?start=1&limit=300&convert=USD&aux=cmc_rank,tags");
       if (!Array.isArray(listings)) throw new ScanRequestError("invalid_response");
-      let followed = await this.ctx.storage.get<Followed[]>("entries") ?? [];
+      // Retire legacy scenario tracking once; notification audit and deduplication survive.
+      if (!await this.ctx.storage.get<boolean>("no_followup_migrated")) {
+        await this.ctx.storage.delete("entries");
+        await this.ctx.storage.put("no_followup_migrated",true);
+      }
       const normalized = listings.map((a: any) => ({ ...a, quote: { USD: usd(a.quote) } }));
       const radar=await this.ctx.storage.get<Record<string,number>>("radar") ?? {};
-      const previous=await this.ctx.storage.get<Parameters<typeof selectEntryCandidates>[2]>("listing_observations") ?? {};
-      const selected=selectEntryCandidates(normalized,followed,previous,radar,await this.ctx.storage.get<number>("cursor")??0,now);
+      const previous=await this.ctx.storage.get<Parameters<typeof selectEntryCandidates>[1]>("listing_observations") ?? {};
+      const selected=selectEntryCandidates(normalized,previous,radar,await this.ctx.storage.get<number>("cursor")??0,now);
       const {eligible,candidates,selection}=selected;
       await this.ctx.storage.put({cursor:selected.nextCursor,listing_observations:selected.observations});
       snapshot={at:new Date(now).toISOString(),mode,universe:normalized.length,selection,assets:[],decisions:[]};
@@ -114,7 +117,7 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
         const points=(Array.isArray(asset?.quotes)?asset.quotes:[]).map((x:any)=>({timestamp:x.timestamp,price:usd(x.quote)?.price})).slice(-96);
         return {id:a.id,symbol:a.symbol,quote:a.quote?.USD??null,points,news:publications.find(x=>x.id===a.id)!.evidence};
       });
-      snapshot={at:new Date(now).toISOString(),mode,universe:normalized.length,eligible:eligible.length,selection,new_candidates:selected.newCandidates,followed_candidates:candidates.length-selected.newCandidates,market:marketSummary,assets:evidence,decisions};
+      snapshot={at:new Date(now).toISOString(),mode,universe:normalized.length,eligible:eligible.length,selection,new_candidates:selected.newCandidates,followed_candidates:0,market:marketSummary,assets:evidence,decisions};
       const day = new Date(now).toISOString().slice(0, 10);
       const dailyKey=mode === "live" ? "daily" : "paper_daily";
       const count = await this.ctx.storage.get<{ day: string; count: number }>(dailyKey);
@@ -129,9 +132,6 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
         await this.ctx.storage.put("entry_audit",items.concat({at:new Date(now).toISOString(),...event}).slice(-100));
         console.log(JSON.stringify({event:"entry_audit",at:new Date(now).toISOString(),...event}));
       };
-      for (const f of followed.filter(f=>f.mode!==mode)) await audit({id:f.id,mode:f.mode,outcome:"mode_changed",plan:f.plan});
-      followed=followed.filter(f=>f.mode===mode);
-      await this.ctx.storage.put("entries",followed);
       for (const a of candidates) {
         const dispatchDecision:Record<string,unknown>={id:a.id,symbol:a.symbol,stage:"dispatch",reason:"not_evaluated"};
         decisions.push(dispatchDecision);
@@ -139,28 +139,6 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
         const points = (Array.isArray(asset?.quotes) ? asset.quotes : []).map((x: any) => ({ timestamp: x.timestamp, price: usd(x.quote)?.price }));
         const q=a.quote?.USD;
         const news=publications.find(x=>x.id===a.id)!.evidence;
-        const existing=followed.find(f=>f.id===a.id);
-        if (existing) {
-          dispatchDecision.reason="existing_follow";
-          const evaluationTime=Date.now();
-          const checkpoint=existing.checked_at ?? existing.plan.quote_at;
-          const outcome=entryOutcome({...existing.plan,quote_at:checkpoint},points,q?.price,q?.last_updated,evaluationTime);
-          if (!outcome) {
-            existing.checked_at=q.last_updated;
-            if (evaluationTime>=Date.parse(existing.plan.review_until)) {
-              existing.plan.review_until=new Date(evaluationTime+4*3600000).toISOString();
-              await audit({id:a.id,mode,outcome:"review_continues",plan:existing.plan});
-            }
-            await this.ctx.storage.put("entries",followed);
-            continue;
-          }
-          followed=followed.filter(f=>f.id!==a.id);
-          // Persist closure before any uncertain send: no duplicate follow-up.
-          await this.ctx.storage.put("entries",followed);
-          await audit({id:a.id,symbol:existing.symbol,mode:existing.mode,outcome,plan:existing.plan});
-          // Outcomes remain in the audit; Telegram receives only the entry.
-          continue;
-        }
         const market=[marketSummary.btc1h,marketSummary.eth1h].filter((x):x is number=>typeof x === "number" && Number.isFinite(x));
         const context={change24h:q?.percent_change_24h,change7d:q?.percent_change_7d,volumeChange24h:q?.volume_change_24h,market1h:market.length===2 ? Math.min(...market) : undefined};
         const decision=evaluateEntry(points,q?.price,q?.last_updated,Date.now(),context);
@@ -169,7 +147,7 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
         if (decision.metrics && Number(decision.metrics.change1h)>0) radar[a.id]=now;
         decisions.push({id:a.id,symbol:a.symbol,points:points.length,history_age_minutes:points.length?Math.round((now-Date.parse(points.at(-1)!.timestamp))/60000):null,pattern:plan?.pattern??null,qualified:!!plan,reason:decision.reason,metrics:decision.metrics,context,news_status:news.status,news_source:news.source??null});
         if (!plan) continue;
-        if (followed.length>=2 || attempts>=2 || sentToday>=10) { dispatchDecision.reason="entry_capacity"; continue; }
+        if (attempts>=2 || sentToday>=10) { dispatchDecision.reason="entry_capacity"; continue; }
         // Keep overnight analysis/radar, but never queue an entry for the morning.
         if (mode === "live" && !entryAlertsAllowed(Date.now())) {
           dispatchDecision.reason="quiet_hours";
@@ -209,27 +187,20 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
         // Reserve before sending, including uncertain deliveries.
         await this.ctx.storage.put({ [key]: now, [setupKey]: plan.setup_at, [dailyKey]: { day, count: ++sentToday } });
         attempts++;
-        const entry:Followed={id:a.id,symbol:a.symbol,plan,notified:false,mode};
-        followed.push(entry);
-        await this.ctx.storage.put("entries",followed);
         await audit({id:a.id,symbol:a.symbol,mode,outcome:"entry",plan});
         const n=(v:number)=>Number(v.toPrecision(8)).toString();
         const when=(iso:string)=>new Intl.DateTimeFormat("fr-FR",{timeZone:"Europe/Paris",dateStyle:"short",timeStyle:"short"}).format(new Date(iso))+" (Paris)";
         const relative=Number.isFinite(current.percent_change_1h) && Number.isFinite(marketSummary.btc1h) && marketSummary.btc1h!==null ? n(current.percent_change_1h-marketSummary.btc1h)+" points vs BTC (variations CMC 1 h)" : "indisponible";
-        const message = `🚨 ENTRÉE POTENTIELLE\n\nCrypto : ${a.symbol}\nDonnées : ${when(plan.quote_at)}, CMC / USD\nZone CMC : ${n(plan.min)} – ${n(plan.max)} USD\nObjectif CMC : ${n(plan.target)} USD (+2,55 % depuis le haut de zone)\nPrix maximal acceptable CMC : ${n(plan.max)} USD\nInvalidation : ${n(plan.stop)} USD (${n((1-plan.stop/plan.max)*100)} % sous le haut de zone)\nEntrée valable jusqu’à : ${when(plan.valid_until)}\nSuivi : réévaluation silencieuse, sans expiration automatique à 4 h\nMotif : ${plan.pattern === "pullback" ? "Début de reprise après repli ; potentiel mesuré sur historique échantillonné, non garanti." : "Début de sortie de palier ; extension récente limitée, confirmation complète non exigée."}\nBase objectif : ${plan.target_basis === "prior_leg_projection" ? "projection provisoire d’une jambe antérieure achevée ; aucune résistance supérieure observée" : "marge avant un sommet échantillonné ; résistance non garantie"}.\nRisque principal : prix échantillonnés ; retournement entre deux mesures possible.\n${newsMessage(news)}\nForce relative : ${relative}.\nVolumes courts et cotations Neverless indisponibles.\nAvant achat : vérifier disponibilité et prix achat/vente Neverless ; abandonner hors zone ou si spread > 0,5 %. Objectif estimé 2 % net sous cette hypothèse, non garanti. Prix CMC non exécutables ; aucun achat automatique.`;
+        const message = `🚨 ENTRÉE POTENTIELLE\n\nCrypto : ${a.symbol}\nDonnées : ${when(plan.quote_at)}, CMC / USD\nZone CMC : ${n(plan.min)} – ${n(plan.max)} USD\nObjectif CMC : ${n(plan.target)} USD (+2,55 % depuis le haut de zone)\nPrix maximal acceptable CMC : ${n(plan.max)} USD\nInvalidation : ${n(plan.stop)} USD (${n((1-plan.stop/plan.max)*100)} % sous le haut de zone)\nEntrée valable jusqu’à : ${when(plan.valid_until)}\nSuivi : aucun suivi automatique après cette alerte\nMotif : ${plan.pattern === "pullback" ? "Début de reprise après repli ; potentiel mesuré sur historique échantillonné, non garanti." : "Début de sortie de palier ; extension récente limitée, confirmation complète non exigée."}\nBase objectif : ${plan.target_basis === "prior_leg_projection" ? "projection provisoire d’une jambe antérieure achevée ; aucune résistance supérieure observée" : "marge avant un sommet échantillonné ; résistance non garantie"}.\nRisque principal : prix échantillonnés ; retournement entre deux mesures possible.\n${newsMessage(news)}\nForce relative : ${relative}.\nVolumes courts et cotations Neverless indisponibles.\nAvant achat : vérifier disponibilité et prix achat/vente Neverless ; abandonner hors zone ou si spread > 0,5 %. Objectif estimé 2 % net sous cette hypothèse, non garanti. Prix CMC non exécutables ; aucun achat automatique.`;
         // Storage awaits may cross 23:00. No network send has happened yet: undo
         // this reservation so a fresh morning decision is not treated as a duplicate.
         if (mode === "live" && !entryAlertsAllowed(Date.now())) {
-          followed=followed.filter(f=>f!==entry);
-          await this.ctx.storage.put("entries",followed);
           await this.ctx.storage.put(dailyKey,{day,count:--sentToday}); attempts--;
           if (last===undefined) await this.ctx.storage.delete(key); else await this.ctx.storage.put(key,last);
           if (previousSetup===undefined) await this.ctx.storage.delete(setupKey); else await this.ctx.storage.put(setupKey,previousSetup);
           await audit({id:a.id,mode,outcome:"quiet_hours"}); continue;
         }
         const delivered = mode === "live" && await sendTelegram(this.env, message);
-        entry.notified=delivered;
-        await this.ctx.storage.put("entries",followed);
         await audit({id:a.id,mode,outcome:"entry_delivery",sent:delivered});
         if (delivered) sent++;
       }
