@@ -68,21 +68,21 @@ test('cold start explores ten candidates without ranking strongest hourly gain',
 test('recent recoveries outrank large hourly movers; stale quotes cannot fabricate a recovery',()=>{
  const s=setup(), assets=Array.from({length:20},(_,i)=>({...s.listing,id:i+1,symbol:'X'+i,quote:{USD:{...s.listing.quote.USD,price:100,percent_change_1h:20-i}}}));
  const previous={};for(const a of assets) previous[a.id]={price:a.id===20?99.8:100,at:s.now-900000,delta:a.id===20?-0.004:0};
- const result=s.selectEntryCandidates(assets,[],previous,{},0,s.now);
+ const result=s.selectEntryCandidates(assets,previous,{},0,s.now);
  assert.equal(result.candidates.length,10);assert.ok(result.candidates.some(a=>a.id===20));
  assert.equal(result.selection.find(a=>a.id===20).selection,'recent_recovery_priority');
  assert.equal(result.selection.filter(a=>a.selection==='rotation').length,4);
  assets[19].quote.USD.last_updated=new Date(s.now-900000).toISOString();
- const unchanged=s.selectEntryCandidates(assets,[],previous,{},0,s.now);
+ const unchanged=s.selectEntryCandidates(assets,previous,{},0,s.now);
  assert.equal(unchanged.selection.find(a=>a.id===20).recent_change,null);
  assert.equal(unchanged.selection.find(a=>a.id===20).selection,'not_selected_capacity');
 });
 
-test('coverage identifies existing follow separately and rotates without hourly veto',()=>{
+test('ten places all explore current opportunities and rotate without hourly veto',()=>{
  const s=setup(), assets=Array.from({length:20},(_,i)=>({...s.listing,id:i+1,symbol:'X'+i,quote:{USD:{...s.listing.quote.USD,percent_change_1h:-2}}}));
- const a=s.selectEntryCandidates(assets,[{id:19,symbol:'X18'},{id:20,symbol:'X19'}],{}, {},0,s.now);
- assert.equal(a.candidates.length,10);assert.equal(a.newCandidates,8);assert.equal(a.eligible.length,20);
- const b=s.selectEntryCandidates(assets,[],{}, {},a.nextCursor,s.now);
+ const a=s.selectEntryCandidates(assets,{}, {},0,s.now);
+ assert.equal(a.candidates.length,10);assert.equal(a.newCandidates,10);assert.equal(a.eligible.length,20);
+ const b=s.selectEntryCandidates(assets,{}, {},a.nextCursor,s.now);
  assert.equal(b.candidates[0].id,5);
 });
 
@@ -202,31 +202,24 @@ test('CMC nonzero string codes and malformed success bodies fail closed', async 
   assert.equal(missing.storage.get('status').kind,'invalid_response'); assert.equal(missing.messages.length,0);
 });
 
-test('paper mode persists audit and follows opportunities without Telegram messages', async () => {
+test('paper mode audits opportunities without creating a follow-up or Telegram message', async () => {
   const s=setup(true,false); await s.scanner.run(Math.floor(s.now/900000));
   assert.equal(s.messages.length,0); assert.equal(s.storage.get('status').outcome,'simulation');
-  assert.equal(s.storage.get('entries').length,1); assert.ok(s.storage.get('entry_audit').length);
+  assert.equal(s.storage.get('entries'),undefined); assert.ok(s.storage.get('entry_audit').length);
 });
 
-test('outcomes follow chronological observations, continue beyond four hours for v3 and fail on gaps', () => {
-  const s=setup(), at=new Date(s.now).toISOString(), plan=s.entryPlan(s.points,100.5,at,s.now);
-  const t=s.now+900000, time=new Date(t).toISOString();
-  assert.equal(s.entryOutcome(plan,[{timestamp:time,price:plan.stop-0.1}],plan.target+1,time,t),'invalidated');
-  assert.equal(s.entryOutcome(plan,[],plan.target+0.1,time,t),'target');
-  assert.equal(s.entryOutcome(plan,[],100.5,new Date(s.now+3600000).toISOString(),s.now+3600000),'data_unavailable');
-  const future=Array.from({length:16},(_,i)=>({timestamp:new Date(s.now+(i+1)*900000).toISOString(),price:100.5}));
-  assert.equal(s.entryOutcome(plan,future,100.5,future[15].timestamp,s.now+4*3600000),null);
+test('legacy tracked scenarios are retired without assuming a sale or consuming candidate capacity', async()=>{
+ const s=setup();s.storage.set('entries',[{id:999,symbol:'OLD1',plan:{stop:1}},{id:998,symbol:'OLD2',plan:{target:10}}]);
+ s.storage.set('last:999',s.now-60000);s.storage.set('live:setup:999','old-signal');
+ await s.scanner.run(Math.floor(s.now/900000));
+ assert.equal(s.storage.get('entries'),undefined);assert.equal(s.storage.get('no_followup_migrated'),true);
+ assert.equal(s.messages.length,1);assert.ok(s.messages[0].includes('aucun suivi automatique'));
+ assert.equal(s.storage.get('last:999'),s.now-60000);assert.equal(s.storage.get('live:setup:999'),'old-signal');
+ assert.equal(s.calls.find(x=>x.includes('quotes/historical')).includes('999'),false);
+ assert.equal(s.storage.get('scan_evidence')[0].followed_candidates,0);
+ assert.equal(s.entryOutcome,undefined);assert.equal(s.entryPlan(s.points,100.5,new Date(s.now).toISOString(),s.now).review_until,undefined);
+ assert.equal(s.logs.some(x=>['target','invalidated','review_continues'].includes(x.outcome)),false);
 });
-
-test('active opportunities remain followed after leaving screening and close only once', async () => {
-  const s=setup(), slot=Math.floor(s.now/900000); await s.scanner.run(slot);
-  const f=s.storage.get('entries')[0]; f.plan.stop=101;
-  s.listing.quote.USD.percent_change_1h=-2;
-  await s.restart().run(slot+1);
-  assert.equal(s.messages.length,1); assert.equal(s.storage.get('entries').length,0);
-  await s.restart().run(slot+1); assert.equal(s.messages.length,1);
-});
-
 
 test('v3 explains fading price, weak context and volume instead of notifying', () => {
   const s=setup(), at=new Date(s.now).toISOString();
@@ -244,12 +237,6 @@ test('quote deterioration immediately before send suppresses entry without reser
   assert.equal(s.messages.length,0); assert.equal(s.storage.get('daily'),undefined);
   assert.ok(s.storage.get('entry_audit').some(x=>x.outcome==='pre_send_rejected'));
 });
-test('checkpoint lets a v3 scenario survive beyond a rolling history window', () => {
-  const s=setup(),at=new Date(s.now).toISOString(),plan=s.entryPlan(s.points,100.5,at,s.now);
-  const now=s.now+25*3600000,checkpoint=new Date(now-15*60000).toISOString();
-  assert.equal(s.entryOutcome({...plan,quote_at:checkpoint},[],100.5,new Date(now).toISOString(),now),null);
-});
-
 test('fresh quote budget is persistent even when entries are rejected', async () => {
  const s=setup(); s.storage.set('fresh_daily',{day:new Date(s.now).toISOString().slice(0,10),count:10});
  await s.scanner.run(Math.floor(s.now/900000));
@@ -257,10 +244,10 @@ test('fresh quote budget is persistent even when entries are rejected', async ()
  assert.equal(s.storage.get('fresh_daily').count,10);
 });
 
-test('same sampled setup does not send again after closure and cooldown', async () => {
+test('same sampled setup does not send again without follow-up after cooldown', async () => {
  const s=setup(),slot=Math.floor(s.now/900000); await s.scanner.run(slot);
  assert.equal(s.messages.length,1);
- s.storage.set('entries',[]); s.storage.set('last:1',s.now-3*3600000);
+ s.storage.set('last:1',s.now-3*3600000);
  await s.restart().run(slot+1);
  assert.equal(s.messages.length,1);
  assert.ok(s.storage.get('entry_audit').some(x=>x.outcome==='duplicate_setup'));
@@ -328,19 +315,19 @@ test('night scan keeps the radar but makes no send reservation, fresh-quote requ
  const s=setup(true,true,Date.parse('2026-10-07T21:15:00Z'));
  await s.scanner.run(Math.floor(s.now/900000));
  assert.equal(s.calls.length,2);assert.equal(s.messages.length,0);assert.equal(s.storage.get('daily'),undefined);
- assert.equal(s.storage.get('fresh_daily'),undefined);assert.equal(s.storage.get('entries').length,0);assert.ok(s.storage.get('radar')[1]);
+ assert.equal(s.storage.get('fresh_daily'),undefined);assert.equal(s.storage.get('entries'),undefined);assert.ok(s.storage.get('radar')[1]);
  const morning=Date.parse('2026-10-08T07:00:00Z'),delta=morning-s.now;s.setClock(morning);
  s.points.forEach(x=>x.timestamp=new Date(Date.parse(x.timestamp)+delta).toISOString());s.listing.quote.USD.last_updated=new Date(morning).toISOString();
  s.listing.quote.USD.price=100.4;await s.restart().run(Math.floor(morning/900000));
  assert.equal(s.messages.length,0); // New price fails: no replay of yesterday's qualified occasion.
 });
-test('night window does not stop following an existing live scenario',async()=>{
+test('night scan also retires legacy follow-up without issuing an entry or closure message',async()=>{
  const s=setup(true,true,Date.parse('2026-10-07T21:15:00Z'));
- const plan=s.entryPlan(s.points,100.5,new Date(s.now).toISOString(),s.now);plan.quote_at=new Date(s.now-900000).toISOString();
- s.storage.set('entries',[{id:1,symbol:'BTC',plan,mode:'live',notified:true}]);
- await s.scanner.run(Math.floor(s.now/900000));assert.equal(s.messages.length,0);assert.equal(s.storage.get('entries').length,1);
- assert.equal(s.storage.get('entries')[0].checked_at,s.listing.quote.USD.last_updated);
+ s.storage.set('entries',[{id:999,symbol:'OLD',plan:{},mode:'live',notified:true}]);
+ await s.scanner.run(Math.floor(s.now/900000));assert.equal(s.messages.length,0);assert.equal(s.storage.get('entries'),undefined);
+ assert.equal(s.storage.get('no_followup_migrated'),true);
 });
+
 test('crossing 23:00 during storage writes cancels the unsent reservation and restores previous state',async()=>{
  for(const prior of [false,true]) {
   const s=setup(true,true,Date.parse('2026-10-07T20:59:59.500Z')),old=s.now-3*3600000;
@@ -349,7 +336,7 @@ test('crossing 23:00 during storage writes cancels the unsent reservation and re
    if(typeof key==='string')s.storage.set(key,value);else Object.entries(key).forEach(([k,v])=>s.storage.set(k,v));
    if(key==='entry_audit' && value.at(-1)?.outcome==='entry')s.setClock(Date.parse('2026-10-07T21:00:00Z'));
   });
-  await s.scanner.run(Math.floor(s.now/900000));assert.equal(s.messages.length,0);assert.equal(s.storage.get('entries').length,0);
+  await s.scanner.run(Math.floor(s.now/900000));assert.equal(s.messages.length,0);assert.equal(s.storage.get('entries'),undefined);
   assert.equal(s.storage.get('daily').count,prior?3:0);assert.equal(s.storage.get('last:1'),prior?old:undefined);
   assert.equal(s.storage.get('live:setup:1'),prior?'previous':undefined);assert.equal(s.storage.get('status').attempts,0);
  }
@@ -374,4 +361,19 @@ test('a scan crossing 23:00 during the fresh quote does not reserve or send an e
  await s.scanner.run(Math.floor(s.now/900000));assert.equal(s.messages.length,0);
  assert.equal(s.storage.get('daily'),undefined);assert.equal(s.storage.get('last:1'),undefined);
  assert.equal(s.storage.get('fresh_daily').count,1);
+});
+
+test('sent alerts never occupy future slots; another asset may notify on the next scan',async()=>{
+ const s=setup();
+ s.setFetch(async url=>{
+  s.calls.push(url);
+  const assets=[1,2,3].map(id=>({...s.listing,id,symbol:'X'+id}));
+  const data=url.includes('listings')?assets:url.includes('quotes/latest')?Object.fromEntries(assets.map(a=>[a.id,a])):Object.fromEntries(assets.map(a=>[a.id,{id:a.id,quotes:s.points.map(p=>({timestamp:p.timestamp,quote:{USD:{price:p.price}}}))}]));
+  return {ok:true,json:async()=>({status:{error_code:0},data})};
+ });
+ await s.scanner.run(Math.floor(s.now/900000));assert.equal(s.messages.length,2);assert.equal(s.storage.get('entries'),undefined);
+ const next=s.now+900000;s.setClock(next);s.points.forEach(p=>p.timestamp=new Date(Date.parse(p.timestamp)+900000).toISOString());s.listing.quote.USD.last_updated=new Date(next).toISOString();
+ await s.restart().run(Math.floor(next/900000));assert.equal(s.messages.length,3);assert.ok(s.messages[2].includes('Crypto : X3'));
+ assert.equal(s.storage.get('entries'),undefined);assert.equal(s.storage.get('daily').count,3);
+ assert.equal(s.storage.get('status').candidates,3);assert.equal(s.storage.get('scan_evidence').at(-1).new_candidates,3);
 });

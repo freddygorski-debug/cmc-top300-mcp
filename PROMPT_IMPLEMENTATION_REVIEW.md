@@ -1,4 +1,4 @@
-# Correspondance prompt / scanner — révision proposée du 6 octobre 2026
+# Correspondance prompt / scanner — révision proposée du 6 octobre 2026, complétée par la suppression du suivi
 
 Cette révision est à valider avant fusion et déploiement. Elle corrige des écarts précis, sans prétendre reproduire tout le raisonnement du Scan 5 % ni démontrer une rentabilité.
 
@@ -6,13 +6,13 @@ Cette révision est à valider avant fusion et déploiement. Elle corrige des é
 |---|---|---|---|
 | Chercher tôt | Classement par plus forte hausse sur une heure | Priorité aux variations positives récentes entre listings, surtout après variation négative ; exploration par rotation | Test de reprise face à fortes hausses horaires ; aucun signal de reprise à partir de timestamps inchangés. Un indice de listing ne suffit pas à une entrée. |
 | Heure = contexte, pas attente | Veto sur heure non positive | Retirer le veto horaire ; valider la structure récente | Une reprise à creux ascendant avec heure négative peut passer. Aucune attente d'une heure ajoutée. |
-| Davantage de couverture | Cinq historiques partagés avec suivis | Dix historiques au total, jusqu'à deux suivis et huit nouveaux si deux suivis présents | Couverture séparée dans les snapshots, quatre places de rotation. Dix nouvelles recherches plus suivis ne sont pas annoncées. |
+| Davantage de couverture | Cinq historiques partagés avec suivis | Dix historiques consacrés aux occasions actuelles, sans places de suivi | Dix nouvelles recherches possibles dans les snapshots, quatre places de rotation ; aucun historique réservé aux anciennes alertes. |
 | Début d'une nouvelle vague | Motif de reprise trop simplifié | Creux actuel supérieur au creux précédent ; limite de 1,2 % d'extension depuis le support ; sortie de base récente étroite | Tests de reprise, recul récent, vague trop avancée et rebond à creux descendant. Seuils provisoires, pas calibrés sur des résultats réels. |
 | Escalier haussier | Une hausse déjà faite pouvait justifier le prochain objectif | Jambe antérieure achevée utilisée uniquement pour une projection explicitement incertaine ; structure de creux ascendants | Test synthétique d'escalier. Un objectif fixé à +2,55 % reste conditionnel, pas un gain prédit. |
 | Potentiel depuis l'entrée | Hausse actuelle de quatre heures >=2,55 % utilisée comme preuve | Supprimer cette règle ; marge jusqu'au sommet supérieur observé, sinon projection encadrée ou rejet | Les sommets hors des quatre heures trente sont inconnus. Une résistance visible peut être franchie ou échouer. |
 | Éviter les envois au retournement | Prix frais comparé au dernier échantillon | Conserver la dernière vérification après les actualités et ajouter le rejet du recul entre les deux derniers échantillons | Tests prix/volume frais ; une pente intraminute et une baisse future restent indétectables. Aucun prix Neverless ni OHLC court ajouté. |
 | Expliquer les absences | Seuls certains candidats examinés apparaissaient | Motif de présélection/non-sélection pour chaque actif listé ; motifs techniques et limites d'envoi séparés | Une absence future peut être examinée dans les snapshots ; un passage ancien non conservé ne peut pas être reconstitué. |
-| Peu de messages | Risque de répétition des marches | Une entrée par scénario, suivi silencieux et délai de deux heures conservés | Une nouvelle marche pendant un scénario suivi ne produit pas une invitation supplémentaire. Ce compromis limite volontairement les notifications. |
+| Peu de messages | Risque de répétition des marches | Une entrée par scénario, aucun suivi après envoi, délai de deux heures conservé | Une nouvelle configuration peut être notifiée sans attendre une ancienne clôture ; le même identifiant de signal et le délai de deux heures protègent contre les répétitions. |
 
 ## Budget et compromis
 
@@ -27,3 +27,7 @@ Les captures et prix rapportés sont des observations utiles, mais ne contiennen
 ## Ce qui reste partiel
 
 Les actualités sont facultatives, avec quatre adaptateurs officiels et découverte de presse pour les noms valides ; ni contenu ni lien causal ne sont vérifiés. Les volumes courts, OHLC cinq minutes, cotations exécutables, disponibilité Neverless et situation du portefeuille restent indisponibles. Une évaluation prospective reste nécessaire pour mesurer faux signaux, délai et occasions manquées. Les tests de comportement n'établissent pas l'efficacité financière.
+
+## Décision ultérieure explicite de Freddy : aucun suivi après alerte
+
+Supprimer le blocage par deux scénarios ouverts, le contrôle ultérieur des objectifs/invalidations, la revue à quatre heures et les états de suivi en simulation. Retirer les anciens suivis au premier scan de la version nouvelle, sans message ni interprétation d'achat/vente. L'audit historique et l'anti-doublon restent ; une analyse rétrospective n'est effectuée que sur demande séparée. Un test envoie deux signaux, puis autorise un troisième actif au scan suivant sans répétition des deux premiers.

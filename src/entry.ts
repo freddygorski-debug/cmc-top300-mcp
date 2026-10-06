@@ -1,8 +1,8 @@
 // CMC samples are prices, not OHLC or executable Neverless quotes.
 export type EntryPoint = { timestamp: string; price: number };
 export type EntryContext = { change24h?: number; change7d?: number; volumeChange24h?: number; market1h?: number };
-export type EntryPlan = { version: "entry-v1" | "entry-v2" | "entry-v3" | "entry-v4"; pattern?: "pullback" | "breakout" | "continuation"; target_basis?: "sampled_resistance" | "prior_leg_projection"; observed_at: string; quote_at: string; entry: number; min: number; max: number; target: number; stop: number; valid_until: string; review_until: string; support?: number; resistance?: number; risk_reward?: number; setup_at?: string };
-export const ENTRY_POLICY = { gross: 0.0255, spread: 0.005, loss: 0.02, hours: 4, validityMinutes: 15 } as const;
+export type EntryPlan = { version: "entry-v5"; pattern?: "pullback" | "breakout" | "continuation"; target_basis?: "sampled_resistance" | "prior_leg_projection"; observed_at: string; quote_at: string; entry: number; min: number; max: number; target: number; stop: number; valid_until: string; support?: number; resistance?: number; risk_reward?: number; setup_at?: string };
+export const ENTRY_POLICY = { gross: 0.0255, spread: 0.005, loss: 0.02, validityMinutes: 15 } as const;
 export type EntryDecision = { plan: EntryPlan | null; reason: string; metrics?: Record<string, number | null> };
 export function evaluateEntry(points: EntryPoint[], live: number, liveAt: string, now: number, context: EntryContext = {}): EntryDecision {
   const reject = (reason: string, metrics?: Record<string, number | null>): EntryDecision => ({ plan: null, reason, metrics });
@@ -58,27 +58,10 @@ export function evaluateEntry(points: EntryPoint[], live: number, liveAt: string
   }
   const riskReward = (target-max)/(max-stop);
   const pattern = pullback ? "pullback" : change4h > 0.015 ? "continuation" : "breakout";
-  return { reason: "qualified", metrics, plan: { version:"entry-v4",pattern,target_basis:targetBasis,observed_at:new Date(now).toISOString(),quote_at:liveAt,
+  return { reason: "qualified", metrics, plan: { version:"entry-v5",pattern,target_basis:targetBasis,observed_at:new Date(now).toISOString(),quote_at:liveAt,
     entry:live,min,max,target,stop,support,resistance,risk_reward:riskReward,setup_at:pullback?p[p.length-2].timestamp:p.find(x=>x.price===support)!.timestamp,
-    valid_until:new Date(now+ENTRY_POLICY.validityMinutes*60000).toISOString(),review_until:new Date(now+ENTRY_POLICY.hours*3600000).toISOString() } };
+    valid_until:new Date(now+ENTRY_POLICY.validityMinutes*60000).toISOString() } };
 }
 export function entryPlan(points: EntryPoint[], live: number, liveAt: string, now: number, context?: EntryContext): EntryPlan | null {
   return evaluateEntry(points,live,liveAt,now,context).plan;
-}
-export function entryOutcome(plan: EntryPlan, points: EntryPoint[], live: number, liveAt: string, now: number): "target" | "invalidated" | "expired" | "data_unavailable" | null {
-  const from=Date.parse(plan.quote_at), until=plan.version === "entry-v3" || plan.version === "entry-v4" ? now : Date.parse(plan.review_until);
-  const p=points.filter(x=>Date.parse(x.timestamp)>from && Date.parse(x.timestamp)<=Math.min(now,until));
-  let previous=from;
-  for (const x of p) {
-    const t=Date.parse(x.timestamp);
-    if (!Number.isFinite(t) || t<=previous || t-previous>16*60000 || !Number.isFinite(x.price) || x.price<=0) return "data_unavailable";
-    previous=t;
-    if (x.price<=plan.stop) return "invalidated";
-    if (x.price>=plan.target) return "target";
-  }
-  const t=Date.parse(liveAt);
-  if (!Number.isFinite(t) || t<previous || now-t>5*60000 || t>now || !Number.isFinite(live) || live<=0 || t-previous>20*60000) return "data_unavailable";
-  if (t<=until && live<=plan.stop) return "invalidated";
-  if (t<=until && live>=plan.target) return "target";
-  return plan.version !== "entry-v3" && plan.version !== "entry-v4" && now>=until ? "expired" : null;
 }
