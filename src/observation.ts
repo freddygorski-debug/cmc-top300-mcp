@@ -1,6 +1,7 @@
 import { sendTelegram, type TelegramEnv } from "./telegram";
 import { DurableObject } from "cloudflare:workers";
 import { evaluateEntry, entryOutcome, type EntryPlan } from "./entry";
+import { lookupNews, newsMessage, type NewsEvidence } from "./news";
 
 type ScanEnv = TelegramEnv & { AUTO_SCAN_ENABLED?: string; ENTRY_ALERTS_ENABLED?: string; CMC_API_KEY?: string };
 type Followed = { id: number; symbol: string; plan: EntryPlan; notified: boolean; mode: "live" | "paper"; checked_at?: string };
@@ -35,7 +36,7 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
     const record = async (details: Record<string, unknown>) => {
       const status = { checked_at: new Date(now).toISOString(), ...details };
       await this.ctx.storage.put("status", status);
-      // Controlled fields only: never env, URLs, messages or upstream error text.
+      // Controlled fields only: never env, request URLs, messages or upstream error text.
       console.log(JSON.stringify({ event: "observation_scan", ...status }));
     };
     const get = async (path: string) => {
@@ -63,6 +64,7 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
       if (!body || typeof body !== "object" || body.data === undefined || body.data === null) throw new ScanRequestError("invalid_response");
       return body.data;
     };
+    let snapshot:Record<string,unknown> | undefined;
     try {
       const listings = await get("/v3/cryptocurrency/listings/latest?start=1&limit=300&convert=USD&aux=cmc_rank,tags");
       if (!Array.isArray(listings)) throw new ScanRequestError("invalid_response");
@@ -94,15 +96,37 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
       for (const a of rotated) { if (candidates.length>=5) break; if (!candidates.some((x:any)=>x.id===a.id)) { candidates.push(a); rotatedAdded++; } }
       await this.ctx.storage.put("cursor",cursor+Math.max(1,rotatedAdded));
       if (!candidates.length) {
-        await record({ ok: true, outcome: "no_candidates", candidates: 0, attempts: 0, sent: 0 });
+        await record({ ok: true, outcome: "no_candidates", universe:normalized.length, eligible:eligible.length, candidates: 0, attempts: 0, sent: 0 });
         return;
       }
       stage = "history";
+      // Optional publication requests run alongside CMC history, not after the final quote.
+      // A missing/slow source never blocks a price-qualified occasion.
+      const newsBatch=Promise.all(candidates.map(async (a:any)=> {
+        try { return {id:a.id,evidence:await lookupNews(this.ctx.storage,a.id,a.symbol,now)}; }
+        catch { return {id:a.id,evidence:{status:"unavailable",checked_at:new Date(now).toISOString()} as NewsEvidence}; }
+      }));
       const history = await get(`/v3/cryptocurrency/quotes/historical?id=${candidates.map((a: any) => a.id).join(",")}&convert=USD&interval=15m&time_start=${Math.floor((now - 6 * 3600_000) / 1000)}&time_end=${Math.floor(now / 1000)}`);
       const assets: any[] = Array.isArray(history) ? history : history?.id ? [history] : Object.values(history ?? {});
+      const publications=await newsBatch;
       for (const a of candidates) checked[a.id]=now;
       await this.ctx.storage.put("history_checked",Object.fromEntries(Object.entries(checked).filter(([,at])=>now-at<24*3600000)));
+      const marketQuote=(id:number)=> {
+        const quote=normalized.find((x:any)=>x.id===id)?.quote?.USD;
+        const at=Date.parse(quote?.last_updated);
+        return Number.isFinite(at) && now-at>=0 && now-at<=20*60000 ? quote : undefined;
+      };
+      const btc=marketQuote(1), eth=marketQuote(1027);
+      const marketHours=normalized.filter((x:any)=>Array.isArray(x.tags) && !x.tags.includes("stablecoin") && marketQuote(x.id) && Number.isFinite(x.quote.USD?.percent_change_1h)).map((x:any)=>x.quote.USD.percent_change_1h).sort((a:number,b:number)=>a-b);
+      const middle=Math.floor(marketHours.length/2);
+      const marketSummary={btc1h:btc?.percent_change_1h??null,eth1h:eth?.percent_change_1h??null,coverage:marketHours.length,positive:marketHours.filter((x:number)=>x>0).length,negative:marketHours.filter((x:number)=>x<0).length,median1h:marketHours.length?(marketHours.length%2?marketHours[middle]:(marketHours[middle-1]+marketHours[middle])/2):null};
       const decisions:Record<string,unknown>[]=[];
+      const evidence:Record<string,unknown>[]=candidates.map((a:any)=> {
+        const asset=assets.find(x=>Number(x.id)===a.id);
+        const points=(Array.isArray(asset?.quotes)?asset.quotes:[]).map((x:any)=>({timestamp:x.timestamp,price:usd(x.quote)?.price})).slice(-96);
+        return {id:a.id,symbol:a.symbol,quote:a.quote?.USD??null,points,news:publications.find(x=>x.id===a.id)!.evidence};
+      });
+      snapshot={at:new Date(now).toISOString(),mode,universe:normalized.length,eligible:eligible.length,market:marketSummary,assets:evidence,decisions};
       const day = new Date(now).toISOString().slice(0, 10);
       const dailyKey=mode === "live" ? "daily" : "paper_daily";
       const count = await this.ctx.storage.get<{ day: string; count: number }>(dailyKey);
@@ -124,6 +148,7 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
         const asset = assets.find(x => Number(x.id) === a.id);
         const points = (Array.isArray(asset?.quotes) ? asset.quotes : []).map((x: any) => ({ timestamp: x.timestamp, price: usd(x.quote)?.price }));
         const q=a.quote?.USD;
+        const news=publications.find(x=>x.id===a.id)!.evidence;
         const existing=followed.find(f=>f.id===a.id);
         if (existing) {
           const evaluationTime=Date.now();
@@ -146,12 +171,12 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
           continue;
         }
         if (followed.length>=2 || attempts>=2 || sentToday>=10) continue;
-        const market=normalized.filter((x:any)=>x.symbol==="BTC" || x.symbol==="ETH").map((x:any)=>x.quote.USD?.percent_change_1h).filter(Number.isFinite);
+        const market=[marketSummary.btc1h,marketSummary.eth1h].filter((x):x is number=>typeof x === "number" && Number.isFinite(x));
         const context={change24h:q?.percent_change_24h,change7d:q?.percent_change_7d,volumeChange24h:q?.volume_change_24h,market1h:market.length===2 ? Math.min(...market) : undefined};
         const decision=evaluateEntry(points,q?.price,q?.last_updated,Date.now(),context);
         const plan=decision.plan;
         if (decision.metrics && Number(decision.metrics.change1h)>0) radar[a.id]=now;
-        decisions.push({id:a.id,symbol:a.symbol,points:points.length,history_age_minutes:points.length?Math.round((now-Date.parse(points.at(-1)!.timestamp))/60000):null,pattern:plan?.pattern??null,qualified:!!plan,reason:decision.reason,metrics:decision.metrics,context});
+        decisions.push({id:a.id,symbol:a.symbol,points:points.length,history_age_minutes:points.length?Math.round((now-Date.parse(points.at(-1)!.timestamp))/60000):null,pattern:plan?.pattern??null,qualified:!!plan,reason:decision.reason,metrics:decision.metrics,context,news_status:news.status,news_source:news.source??null});
         if (!plan) continue;
         const key = mode === "live" ? `last:${a.id}` : `paper_last:${a.id}`;
         const last = await this.ctx.storage.get<number>(key);
@@ -164,7 +189,10 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
         const fresh=await get(`/v3/cryptocurrency/quotes/latest?id=${a.id}&convert=USD`);
         const raw=(Array.isArray(fresh)?fresh: Object.values(fresh ?? {})).find((x:any)=>Number(x.id)===a.id);
         const current=usd((raw as any)?.quote);
-        const verified=evaluateEntry(points,current?.price,current?.last_updated,Date.now(),context);
+        // Re-check changed market/volume context as well as the price.
+        const freshContext={...context,change24h:current?.percent_change_24h??context.change24h,change7d:current?.percent_change_7d??context.change7d,volumeChange24h:current?.volume_change_24h??context.volumeChange24h};
+        evidence.find(x=>x.id===a.id)!.dispatch_quote=current??null;
+        const verified=evaluateEntry(points,current?.price,current?.last_updated,Date.now(),freshContext);
         if (!verified.plan || current.price<plan.entry || current.price>plan.max) {
           await audit({id:a.id,mode,outcome:"pre_send_rejected",reason:verified.reason,price:current?.price??null});
           continue;
@@ -182,16 +210,24 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
         await audit({id:a.id,symbol:a.symbol,mode,outcome:"entry",plan});
         const n=(v:number)=>Number(v.toPrecision(8)).toString();
         const when=(iso:string)=>new Intl.DateTimeFormat("fr-FR",{timeZone:"Europe/Paris",dateStyle:"short",timeStyle:"short"}).format(new Date(iso))+" (Paris)";
-        const delivered = mode === "live" && await sendTelegram(this.env, `🚨 ENTRÉE POTENTIELLE\n\nCrypto : ${a.symbol}\nZone CMC : ${n(plan.min)} – ${n(plan.max)} USD\nObjectif CMC : ${n(plan.target)} USD (+2,55 % depuis le haut de zone)\nPrix maximal acceptable CMC : ${n(plan.max)} USD\nInvalidation : ${n(plan.stop)} USD (${n((1-plan.stop/plan.max)*100)} % sous le haut de zone)\nEntrée valable jusqu’à : ${when(plan.valid_until)}\nSuivi : réévaluation silencieuse, sans expiration automatique à 4 h\nMotif : ${plan.pattern === "pullback" ? "Début de reprise après repli ; potentiel mesuré sur historique échantillonné, non garanti." : "Cassure ou continuation locale avec contexte 4 h ; confirmation complète non exigée."}\nRisque principal : prix échantillonnés ; retournement entre deux mesures possible.\nCatalyseur : non vérifié par le scanner automatique. Volumes courts et cotations Neverless indisponibles.\nAvant achat : vérifier disponibilité et prix achat/vente Neverless ; abandonner hors zone ou si spread > 0,5 %. Objectif estimé 2 % net sous cette hypothèse, non garanti. Prix CMC non exécutables ; aucun achat automatique.`);
+        const relative=Number.isFinite(current.percent_change_1h) && Number.isFinite(marketSummary.btc1h) && marketSummary.btc1h!==null ? n(current.percent_change_1h-marketSummary.btc1h)+" points vs BTC (variations CMC 1 h)" : "indisponible";
+        const delivered = mode === "live" && await sendTelegram(this.env, `🚨 ENTRÉE POTENTIELLE\n\nCrypto : ${a.symbol}\nDonnées : ${when(plan.quote_at)}, CMC / USD\nZone CMC : ${n(plan.min)} – ${n(plan.max)} USD\nObjectif CMC : ${n(plan.target)} USD (+2,55 % depuis le haut de zone)\nPrix maximal acceptable CMC : ${n(plan.max)} USD\nInvalidation : ${n(plan.stop)} USD (${n((1-plan.stop/plan.max)*100)} % sous le haut de zone)\nEntrée valable jusqu’à : ${when(plan.valid_until)}\nSuivi : réévaluation silencieuse, sans expiration automatique à 4 h\nMotif : ${plan.pattern === "pullback" ? "Début de reprise après repli ; potentiel mesuré sur historique échantillonné, non garanti." : "Cassure ou continuation locale avec contexte 4 h ; confirmation complète non exigée."}\nRisque principal : prix échantillonnés ; retournement entre deux mesures possible.\n${newsMessage(news)}\nForce relative : ${relative}.\nVolumes courts et cotations Neverless indisponibles.\nAvant achat : vérifier disponibilité et prix achat/vente Neverless ; abandonner hors zone ou si spread > 0,5 %. Objectif estimé 2 % net sous cette hypothèse, non garanti. Prix CMC non exécutables ; aucun achat automatique.`);
         entry.notified=delivered;
         await this.ctx.storage.put("entries",followed);
         await audit({id:a.id,mode,outcome:"entry_delivery",sent:delivered});
         if (delivered) sent++;
       }
       await this.ctx.storage.put("radar",Object.fromEntries(Object.entries(radar).filter(([,at])=>now-at<4*3600000)));
-      await record({ mode, eligible:eligible.length, decisions, candidates: candidates.length, attempts, sent, reserved_today: sentToday, fresh_quotes_today:freshToday, ok: mode === "paper" || sent === attempts, outcome: mode === "paper" ? "simulation" : attempts === 0 ? "no_alert" : sent === attempts ? "sent" : "delivery_unconfirmed" });
+      await record({ mode, universe:normalized.length, market:marketSummary, news_checked:publications.filter(x=>x.evidence.status!=="unsupported").length, eligible:eligible.length, decisions, candidates: candidates.length, attempts, sent, reserved_today: sentToday, fresh_quotes_today:freshToday, ok: mode === "paper" || sent === attempts, outcome: mode === "paper" ? "simulation" : attempts === 0 ? "no_alert" : sent === attempts ? "sent" : "delivery_unconfirmed" });
     } catch (error) {
+      if (snapshot) snapshot.failure={stage,kind:error instanceof ScanRequestError?error.kind:"internal"};
       await record({ ok: false, outcome: "data_error", stage, kind: error instanceof ScanRequestError ? error.kind : "internal", ...(error instanceof ScanRequestError && error.code !== undefined ? { code: error.code } : {}) });
+    } finally {
+      if (snapshot) {
+        // Retain actual inputs even when dispatch fails; never reconstruct them from later charts.
+        const snapshots=await this.ctx.storage.get<Record<string,unknown>[]>("scan_evidence") ?? [];
+        await this.ctx.storage.put("scan_evidence",snapshots.concat(snapshot).slice(-24));
+      }
     }
   }
 }
