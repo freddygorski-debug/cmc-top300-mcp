@@ -64,7 +64,7 @@ test('Stacks is labelled as an ecosystem relay rather than a primary announcemen
   const s=setup(()=>new Response(rss(item('Community update','https://www.stacks.co/blog/community-update'))));
   const evidence=await s.lookupNews(s.storage,4847,'STX',now);
   assert.equal(evidence.status,'recent_publication'); assert.equal(evidence.aggregator,true);
-  assert.ok(s.newsMessage(evidence).includes('relay')); assert.ok(s.newsMessage(evidence).includes('agr')); 
+  assert.ok(s.newsMessage(evidence).includes('relay')); assert.ok(s.newsMessage(evidence).includes('agr'));
 });
 test('an aborted source uses one shared bounded request signal and records timeout without upstream details',async()=>{
   const s=setup((url,{signal})=>{assert.equal(signal.aborted,true);throw new Error('SECRET_TIMEOUT');});
