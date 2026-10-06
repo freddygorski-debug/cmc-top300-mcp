@@ -1,6 +1,6 @@
 # PROMPT MAÎTRE — SCAN CMC TOP 300 / NEVERLESS
 
-Version 3 — révision proposée du 6 octobre 2026, intégrant les notes sur les vagues, escaliers et présélection. Ce document décrit le comportement souhaité ; il ne modifie pas à lui seul le Worker déployé.
+Version 4 — révision proposée du 6 octobre 2026, supprimant le suivi après alerte à la demande de Freddy. Ce document décrit le comportement souhaité ; il ne modifie pas à lui seul le Worker déployé.
 
 ## Mission et objectif
 
@@ -12,11 +12,11 @@ L'utilisateur décide de ses achats et ventes. Aucun ordre automatique, aucune m
 
 ## Univers et couverture
 
-À chaque nouveau scan, rechercher de nouvelles occasions dans le Top 300 CoinMarketCap, sans se limiter aux actifs habituels, détenus ou déjà suivis. Conserver en parallèle un radar silencieux des candidats encore pertinents.
+À chaque nouveau scan, rechercher de nouvelles occasions dans le Top 300 CoinMarketCap, sans se limiter aux actifs habituels, détenus ou déjà suivis. Un radar silencieux peut servir à la présélection de nouvelles occasions ; il ne doit pas suivre les objectifs ou invalidations des alertes déjà envoyées.
 
 Distinguer les actifs présélectionnés par leurs cotations des actifs réellement analysés en détail. Donner la couverture exacte dans l'audit ; ne jamais annoncer une analyse complète des 300 historiques si elle n'a pas été faite.
 
-Viser jusqu'à dix historiques détaillés par passage, sous réserve du budget API, sans garantir une occasion à chaque scan. Distinguer les historiques de scénarios déjà suivis de ceux des nouvelles recherches : dans l'implémentation proposée, le plafond de dix est partagé, avec au maximum deux suivis existants et donc huit nouvelles recherches lorsqu'ils sont tous deux présents. Réserver une part à la rotation des actifs, pour éviter un classement limité aux plus fortes hausses.
+Viser jusqu'à dix historiques détaillés par passage, sous réserve du budget API, sans garantir une occasion à chaque scan. Les dix places sont consacrées à la recherche d'occasions actuelles ; aucune place n'est réservée au suivi d'anciennes alertes. Réserver une part à la rotation des actifs, pour éviter un classement limité aux plus fortes hausses.
 
 Utiliser l'historique d'une heure pour comprendre la structure, sans exiger une forte hausse horaire ni attendre une heure de confirmation. Privilégier le démarrage ou la reprise actuelle et le potentiel restant depuis l'entrée proposée. Une variation récente entre deux cotations de listing est un indice de présélection, pas la preuve d'une reprise ni une bougie.
 
@@ -89,15 +89,13 @@ Les prix CMC ne sont pas exécutables sur Neverless. Si l'accès aux cotations N
 
 ## Une seule alerte d'entrée par occasion
 
-Plage d'envoi automatique ajoutée à la demande de Freddy : de 9 h inclus à 23 h exclu, heure Europe/Paris, avec adaptation automatique heure d'été/hiver. Le scanner et le suivi restent actifs la nuit. Ne pas mettre les entrées nocturnes en attente d'envoi : après 9 h, toute alerte doit correspondre à une nouvelle analyse actuelle. Les tests et envois manuels expressément demandés ne relèvent pas de cette plage automatique.
+Plage d'envoi automatique ajoutée à la demande de Freddy : de 9 h inclus à 23 h exclu, heure Europe/Paris, avec adaptation automatique heure d'été/hiver. Le scanner reste actif la nuit, sans suivi des alertes envoyées. Ne pas mettre les entrées nocturnes en attente d'envoi : après 9 h, toute alerte doit correspondre à une nouvelle analyse actuelle. Les tests et envois manuels expressément demandés ne relèvent pas de cette plage automatique.
 
 Le radar et les candidats en attente restent silencieux. Aucun enchaînement « à surveiller », « presque prêt », puis entrée tardive. Aucun message d'entrée répété pour le même scénario ni alerte de renforcement automatique.
 
 Envoyer une seule alerte quand l'entrée devient suffisamment étayée et encore exploitable. Plusieurs actifs peuvent représenter des occasions distinctes ; ne pas créer un quota obligeant à produire des signaux.
 
-Une nouvelle alerte sur le même actif nécessite une nouvelle configuration identifiable après la clôture ou l'invalidation du scénario précédent. Conserver un identifiant de scénario et l'état d'envoi pour éviter les doublons.
-
-La détection d'une nouvelle marche et l'autorisation d'une nouvelle notification sont distinctes. Tant qu'un scénario reste suivi, ne pas émettre une seconde invitation d'entrée sur le même actif. Le scanner proposé conserve également le délai minimal de deux heures entre notifications : cette limite peut empêcher d'alerter sur chaque marche et doit apparaître dans l'audit. Aucun renforcement automatique.
+Une nouvelle alerte sur le même actif nécessite une nouvelle configuration identifiable et le respect des protections anti-doublons. Elle ne dépend pas de la clôture, de l'objectif ou de l'invalidation d'une ancienne alerte, qui ne sont plus suivis. Conserver uniquement l'identifiant du dernier scénario notifié et l'heure de notification pour éviter les répétitions. Le délai minimal de deux heures entre notifications reste appliqué et doit apparaître dans l'audit. Aucun renforcement automatique.
 
 Format bref :
 
@@ -114,21 +112,19 @@ Risque principal : [incertitude la plus importante]
 Validité de l'entrée : [condition et limite temporelle adaptée]
 Avant achat : vérifier Neverless ; abandonner hors zone ou si coût incompatible avec l'objectif. Aucun achat automatique.
 
-## Durée et suivi
+## Après l'alerte : aucun suivi automatique
 
-La validité d'une entrée et la durée de suivi sont deux choses différentes. Une entrée devenue périmée ne reste pas valable parce que le suivi continue.
+L'utilisateur choisit de suivre l'alerte ou non et gère lui-même son éventuel achat. Le scanner ne crée aucune position détenue ni aucun scénario à suivre après la notification. Il ne vérifie ensuite ni atteinte de l'objectif, ni invalidation, ni résultat, et n'effectue aucune réévaluation à quatre heures. Aucun message de clôture ou de vente.
 
-Ne plus terminer automatiquement un scénario au bout de quatre heures uniquement parce que l'objectif n'est pas atteint. À quatre heures, réévaluer silencieusement la structure, le potentiel restant, l'invalidation et la qualité des données. Continuer si le scénario reste valable ; ne pas déplacer l'invalidation pour éviter de constater son échec.
+La validité de l'entrée concerne seulement les conditions et le délai indiqués au moment de l'alerte ; elle ne définit pas une durée de détention. Le scanner poursuit la recherche de nouvelles occasions à chaque passage. Une alerte précédente n'occupe aucune place et ne bloque pas une autre crypto.
 
-Aucune durée maximale nouvelle n'a été fixée. Ne pas inventer une limite à 24 heures ou une conservation indéfinie. Cette durée devra être définie pour l'implémentation du suivi automatique. Une expiration administrative ou des données indisponibles ne sont pas des instructions de vente.
-
-Ne pas confondre suivi d'un scénario et suivi d'une position réellement détenue. Sans confirmation d'achat et prix d'exécution, ne pas annoncer un gain réalisé. Le mandat actuel porte sur une seule notification d'entrée ; les rapports de suivi restent accessibles à la demande, sans messages automatiques supplémentaires.
+Conserver les données de décision et d'envoi dans l'audit pour comprendre les alertes et les rejets, sans surveiller leur évolution. Une analyse rétrospective peut être demandée séparément par l'utilisateur ; elle ne fait pas partie du fonctionnement automatique.
 
 ## Audit et évaluation
 
 Conserver sans secrets : univers et couverture réelle, sources et heures, données utilisées, configuration retenue, motifs précis de rejet, zone, objectif, invalidation, contrôle avant envoi et état de notification.
 
-Évaluer aussi les occasions manquées et les fausses entrées. Utiliser uniquement les informations disponibles à l'heure du signal ; distinguer résultats sur prix échantillonnés, simulations et transactions réelles. Inclure coûts, délai, pertes et incertitudes. Ne pas annoncer une efficacité démontrée sur quelques exemples choisis.
+Lors d'une évaluation séparément demandée, examiner aussi les occasions manquées et les fausses entrées. Utiliser uniquement les informations disponibles à l'heure du signal ; distinguer résultats sur prix échantillonnés, simulations et transactions réelles. Inclure coûts, délai, pertes et incertitudes. Ne pas annoncer une efficacité démontrée sur quelques exemples choisis.
 
 ## Commandes
 
