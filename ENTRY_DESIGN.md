@@ -1,4 +1,4 @@
-# Entry alerts v3 â€” draft, no production change
+# Entry alerts v3 — draft, no production change
 
 A single entry notification per tracked occasion replaces entry plus closure. Outcomes remain in the audit. Existing v1/v2 plans retain their thresholds and legacy expiry, but receive no automatic closure message. New v3 plans use a persistent quote checkpoint and continue beyond four hours while support/target remain untouched and data continuity is valid. Four hours triggers a silent review record; it is not a holding limit or order. Two open scenarios can therefore occupy follow-up capacity for longer. No maximum holding period was authorized.
 
@@ -10,7 +10,7 @@ Patterns: early local breakout, continuation in a rising four-hour context, and 
 
 Provisional thresholds: four-hour decline below -0.5% rejects; 24h below -3% needs four-hour recovery of at least 1%; rolling volume decline below -20% rejects. A positive sampled hour is required. These rules are documented starting choices, not calibrated or validated trading results. Very early recoveries may remain excluded. BTC/ETH hourly context is available only when both quotes exist; it is not a mandatory bullish veto.
 
-Zone is live +/-0.15%. Target is upper zone *1.0255. Technical stop lies below sampled support with 0.2â€“0.4% buffer, capped at 2% risk from upper zone. An overhead sampled peak must leave room for target. With no sampled peak, the previous four-hour advance must cover the target distance: provisional momentum projection, not evidence of a guaranteed price. Price discovery is therefore treated with explicit uncertainty.
+Zone is live +/-0.15%. Target is upper zone *1.0255. Technical stop lies below sampled support with 0.2–0.4% buffer, capped at 2% risk from upper zone. An overhead sampled peak must leave room for target. With no sampled peak, the previous four-hour advance must cover the target distance: provisional momentum projection, not evidence of a guaranteed price. Price discovery is therefore treated with explicit uncertainty.
 
 Objective aims at about 2% net under the user's assumed total spread <=0.5%; Neverless availability, execution quotes and actual round-trip costs remain unchecked. Catalysts are explicitly NOT VERIFIED: no approved structured news source exists in this Worker. Five-minute OHLC, candle volume, macro and actual portfolio holdings are also unavailable. The manual prompt can research these; this automated revision cannot claim full prompt fidelity.
 
