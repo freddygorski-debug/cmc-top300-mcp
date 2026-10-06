@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const ts = require('typescript');
+function history(s,prices) { return prices.map((price,i)=>({price,timestamp:new Date(s.now-(prices.length-1-i)*900000).toISOString()})); }
 function setup(enabled = true, live = true, start = Date.parse("2026-10-07T10:00:00Z")) {
   const now = start;
   let clock = start;
@@ -22,7 +23,7 @@ function setup(enabled = true, live = true, start = Date.parse("2026-10-07T10:00
     sendTelegram: async (env, text) => { messages.push(text); return true; },
     fetch: async url => { calls.push(url); return { ok: true, json: async () => ({ status: {error_code:0}, data: url.includes('listings') ? [listing] : url.includes('quotes/latest') ? {1:listing} : { 1: { id: 1, quotes: points.map(x => ({ timestamp:x.timestamp, quote:{USD:{price:x.price}} })) } } }) }; },
   };
-  const source = (fs.readFileSync('src/entry.ts','utf8')+'\n'+fs.readFileSync('src/news.ts','utf8')+'\n'+fs.readFileSync('src/observation.ts','utf8')).replace(/^import .*;\r?\n/gm,'');
+  const source = (fs.readFileSync('src/entry.ts','utf8')+'\n'+fs.readFileSync('src/selection.ts','utf8')+'\n'+fs.readFileSync('src/news.ts','utf8')+'\n'+fs.readFileSync('src/observation.ts','utf8')).replace(/^import .*;\r?\n/gm,'');
   vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,context);
   return { ...context.exports, scanner: new context.exports.ObservationScanner(ctx, env), now, storage, calls, messages, points, listing, logs,
     mapResponse: transform => { const original = context.fetch; context.fetch = async url => { const response = await original(url); const body = await response.json(); return { ...response, json: async () => transform(body) }; }; },
@@ -55,13 +56,79 @@ test('local breakout with nearby resistance is rejected', () => {
   assert.equal(s.entryPlan(points,103.5,at,s.now),null);
   const flat=points.map(x=>({...x,price:102})); assert.equal(s.entryPlan(flat,102,at,s.now),null);
 });
-test('momentum candidates receive priority without increasing the history request size', async () => {
+test('cold start explores ten candidates without ranking strongest hourly gain', async () => {
   const s=setup();
   s.mapResponse(body=>Array.isArray(body.data)?{...body,data:Array.from({length:20},(_,i)=>({...s.listing,id:i+1,symbol:'X'+i,quote:{USD:{...s.listing.quote.USD,percent_change_1h:(i+1)/10}}}))}:body);
   await s.scanner.run(Math.floor(s.now/900000));
   const url=new URL(s.calls[1]); const ids=url.searchParams.get('id').split(',');
-  assert.equal(ids.length,5); assert.deepEqual(ids.slice(0,2),['20','19']);
+  assert.equal(ids.length,10); assert.deepEqual(ids.slice(0,2),['1','2']);
   assert.equal(s.storage.get('status').eligible,20);
+});
+
+test('recent recoveries outrank large hourly movers; stale quotes cannot fabricate a recovery',()=>{
+ const s=setup(), assets=Array.from({length:20},(_,i)=>({...s.listing,id:i+1,symbol:'X'+i,quote:{USD:{...s.listing.quote.USD,price:100,percent_change_1h:20-i}}}));
+ const previous={};for(const a of assets) previous[a.id]={price:a.id===20?99.8:100,at:s.now-900000,delta:a.id===20?-0.004:0};
+ const result=s.selectEntryCandidates(assets,[],previous,{},0,s.now);
+ assert.equal(result.candidates.length,10);assert.ok(result.candidates.some(a=>a.id===20));
+ assert.equal(result.selection.find(a=>a.id===20).selection,'recent_recovery_priority');
+ assert.equal(result.selection.filter(a=>a.selection==='rotation').length,4);
+ assets[19].quote.USD.last_updated=new Date(s.now-900000).toISOString();
+ const unchanged=s.selectEntryCandidates(assets,[],previous,{},0,s.now);
+ assert.equal(unchanged.selection.find(a=>a.id===20).recent_change,null);
+ assert.equal(unchanged.selection.find(a=>a.id===20).selection,'not_selected_capacity');
+});
+
+test('coverage identifies existing follow separately and rotates without hourly veto',()=>{
+ const s=setup(), assets=Array.from({length:20},(_,i)=>({...s.listing,id:i+1,symbol:'X'+i,quote:{USD:{...s.listing.quote.USD,percent_change_1h:-2}}}));
+ const a=s.selectEntryCandidates(assets,[{id:19,symbol:'X18'},{id:20,symbol:'X19'}],{}, {},0,s.now);
+ assert.equal(a.candidates.length,10);assert.equal(a.newCandidates,8);assert.equal(a.eligible.length,20);
+ const b=s.selectEntryCandidates(assets,[],{}, {},a.nextCursor,s.now);
+ assert.equal(b.candidates[0].id,5);
+});
+
+test('a higher-low early recovery can qualify despite a negative sampled hour',()=>{
+ const s=setup(),points=history(s,[98,99,98,100,104,103,102,101,100,99,100,105,103,100.5,100,99.7,100.1]);
+ const d=s.evaluateEntry(points,100.1,new Date(s.now).toISOString(),s.now);
+ assert.ok(d.plan);assert.equal(d.plan.pattern,'pullback');assert.ok(d.metrics.change1h<0);
+ assert.equal(d.plan.target_basis,'sampled_resistance');
+});
+
+test('a completed earlier stair leg can support a labelled projection, but current advance alone cannot',()=>{
+ const s=setup(), at=new Date(s.now).toISOString();
+ const points=history(s,[100,99,100,104,103,102,101,102,103,104,105,106,106.5,106.2,106.6,106.4,106.8]);
+ const d=s.evaluateEntry(points,106.8,at,s.now);assert.ok(d.plan);assert.equal(d.plan.target_basis,'prior_leg_projection');
+ const monotonic=history(s,Array.from({length:17},(_,i)=>100+i*0.3));
+ assert.equal(s.evaluateEntry(monotonic,104.8,at,s.now).plan,null);
+});
+
+test('lower-low rebound, already-advanced leg and fresh sampled fall cannot become an early entry',()=>{
+ const s=setup(),at=new Date(s.now).toISOString();
+ const falling=history(s,[105,106,105,104,103,102,101,102,103,102,101,100,99,98,97,96,96.3]);
+ assert.equal(s.evaluateEntry(falling,96.3,at,s.now).plan,null);
+ const late=s.points.map(x=>({...x}));late[late.length-1].price=102;
+ assert.equal(s.evaluateEntry(late,102,at,s.now).reason,'entry_leg_already_advanced');
+ const fade=s.points.map(x=>({...x}));fade[fade.length-1].price=99.9;
+ assert.equal(s.evaluateEntry(fade,99.9,at,s.now).reason,'sampled_price_fading');
+});
+
+test('history budget uses at most ten assets over four and a half hours and snapshots explain unselected assets',async()=>{
+ const s=setup();s.mapResponse(body=>Array.isArray(body.data)?{...body,data:Array.from({length:20},(_,i)=>({...s.listing,id:i+1,symbol:'X'+i}))}:body);
+ await s.scanner.run(Math.floor(s.now/900000));
+ const url=new URL(s.calls.find(x=>x.includes('quotes/historical')));
+ assert.equal(url.searchParams.get('id').split(',').length,10);
+ assert.equal(Number(url.searchParams.get('time_end'))-Number(url.searchParams.get('time_start')),4.5*3600);
+ const snapshot=s.storage.get('scan_evidence')[0];assert.equal(snapshot.selection.length,20);
+ assert.equal(snapshot.selection.find(x=>x.id===20).selection,'not_selected_capacity');
+ assert.ok(snapshot.decisions.some(x=>x.reason==='insufficient_data'));
+});
+
+test('reported credits are audited and technical analysis still runs when notification capacity is occupied',async()=>{
+ const s=setup();s.storage.set('daily',{day:new Date(s.now).toISOString().slice(0,10),count:10});
+ s.mapResponse(body=>({...body,status:{...body.status,credit_count:Array.isArray(body.data)?2:1}}));
+ await s.scanner.run(Math.floor(s.now/900000));
+ assert.equal(s.messages.length,0);assert.equal(s.storage.get('status').cmc_credits,3);
+ const snapshot=s.storage.get('scan_evidence')[0];assert.equal(snapshot.cmc_credits,3);
+ assert.ok(snapshot.decisions.some(x=>x.reason==='qualified'));assert.ok(snapshot.decisions.some(x=>x.reason==='entry_capacity'));
 });
 test('disabled scanner makes no requests; enabled scanner serializes duplicate cron events and persists cooldown', async () => {
   const off=setup(false); await off.scanner.run(Math.floor(off.now/900000)); assert.equal(off.calls.length,0);
@@ -165,7 +232,7 @@ test('v3 explains fading price, weak context and volume instead of notifying', (
   const s=setup(), at=new Date(s.now).toISOString();
   assert.equal(s.evaluateEntry(s.points,100.4,at,s.now).reason,'live_price_fading');
   assert.equal(s.evaluateEntry(s.points,100.5,at,s.now,{volumeChange24h:-34}).reason,'declining_rolling_volume');
-  assert.equal(s.evaluateEntry(s.points.map((x,i)=>({...x,price:i===0?100.5:x.price})),100.5,at,s.now,{change24h:-4}).reason,'weak_broader_structure');
+  assert.ok(s.evaluateEntry(s.points.map((x,i)=>({...x,price:i===0?100.5:x.price})),100.5,at,s.now,{change24h:-4}).plan); // Higher-low recovery is assessed, not vetoed by hourly context.
 });
 test('strong hourly movers are no longer excluded by the former four-percent cap', async () => {
   const s=setup(); s.listing.quote.USD.percent_change_1h=5.5;
@@ -233,7 +300,7 @@ test('evidence snapshots are bounded and distinguish actual history coverage fro
  await s.scanner.run(Math.floor(s.now/900000));
  const evidence=s.storage.get('scan_evidence');assert.equal(evidence.length,24);
  const latest=evidence.at(-1);assert.equal(latest.universe,1);assert.equal(latest.assets.length,1);
- assert.equal(latest.assets[0].quote.price,100.5);assert.equal(latest.decisions[0].reason,'qualified');
+ assert.equal(latest.assets[0].quote.price,100.5);assert.equal(latest.decisions[0].reason,'pre_send_verified');
  assert.equal(latest.market.coverage,1);assert.equal(latest.market.positive,1);
  assert.equal(JSON.stringify(latest).includes('fake'),false);
 });
