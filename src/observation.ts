@@ -38,6 +38,7 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
     // Persist before network calls: retries cannot duplicate scans or sends.
     await this.ctx.storage.put("slot", slot);
     let stage: "listings" | "history" | "delivery" = "listings";
+    let historyInterval:"15m"|"5m"="15m";
     let credits:number|null=0;
     const record = async (details: Record<string, unknown>) => {
       const status = { checked_at: new Date(now).toISOString(), cmc_credits:credits, ...details };
@@ -101,6 +102,12 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
       }));
       const history = await get(`/v3/cryptocurrency/quotes/historical?id=${candidates.map((a: any) => a.id).join(",")}&convert=USD&interval=15m&time_start=${Math.floor((now - 4.5 * 3600_000) / 1000)}&time_end=${Math.floor(now / 1000)}`);
       const assets: any[] = Array.isArray(history) ? history : history?.id ? [history] : Object.values(history ?? {});
+      // One bounded batch in alert hours: at most seven 5m points per asset.
+      // Do not spend extra overnight credits or silently fall back after a failure.
+      const useShortTiming=entryAlertsAllowed(now);
+      if(useShortTiming)historyInterval="5m";
+      const shortHistory=useShortTiming ? await get(`/v3/cryptocurrency/quotes/historical?id=${candidates.map((a:any)=>a.id).join(",")}&convert=USD&interval=5m&count=7&time_end=${Math.floor(now/1000)}`) : undefined;
+      const shortAssets:any[]=shortHistory===undefined?[]:Array.isArray(shortHistory)?shortHistory:shortHistory?.id?[shortHistory]:Object.values(shortHistory??{});
       const publications=await newsBatch;
       const marketQuote=(id:number)=> {
         const quote=normalized.find((x:any)=>x.id===id)?.quote?.USD;
@@ -115,7 +122,9 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
       const evidence:Record<string,unknown>[]=candidates.map((a:any)=> {
         const asset=assets.find(x=>Number(x.id)===a.id);
         const points=(Array.isArray(asset?.quotes)?asset.quotes:[]).map((x:any)=>({timestamp:x.timestamp,price:usd(x.quote)?.price})).slice(-96);
-        return {id:a.id,symbol:a.symbol,quote:a.quote?.USD??null,points,news:publications.find(x=>x.id===a.id)!.evidence};
+        const shortAsset=shortAssets.find(x=>Number(x.id)===a.id);
+        const shortPoints=useShortTiming?(Array.isArray(shortAsset?.quotes)?shortAsset.quotes:[]).slice(-7).map((x:any)=>({timestamp:x.timestamp,price:usd(x.quote)?.price})):undefined;
+        return {id:a.id,symbol:a.symbol,quote:a.quote?.USD??null,points,short_points:shortPoints??null,news:publications.find(x=>x.id===a.id)!.evidence};
       });
       snapshot={at:new Date(now).toISOString(),mode,universe:normalized.length,eligible:eligible.length,selection,new_candidates:selected.newCandidates,followed_candidates:0,market:marketSummary,assets:evidence,decisions};
       const day = new Date(now).toISOString().slice(0, 10);
@@ -141,7 +150,10 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
         const news=publications.find(x=>x.id===a.id)!.evidence;
         const market=[marketSummary.btc1h,marketSummary.eth1h].filter((x):x is number=>typeof x === "number" && Number.isFinite(x));
         const context={change24h:q?.percent_change_24h,change7d:q?.percent_change_7d,volumeChange24h:q?.volume_change_24h,market1h:market.length===2 ? Math.min(...market) : undefined};
-        const decision=evaluateEntry(points,q?.price,q?.last_updated,Date.now(),context);
+        const shortPoints=evidence.find(x=>x.id===a.id)!.short_points as Point[]|null;
+        const shortLast=shortPoints?.[shortPoints.length-1];
+        const initial=shortLast && Date.parse(shortLast.timestamp)>Date.parse(q?.last_updated) ? {price:shortLast.price,at:shortLast.timestamp}: {price:q?.price,at:q?.last_updated};
+        const decision=evaluateEntry(points,initial.price,initial.at,Date.now(),context,shortPoints??undefined);
         const plan=decision.plan;
         dispatchDecision.reason=decision.reason;
         if (decision.metrics && Number(decision.metrics.change1h)>0) radar[a.id]=now;
@@ -168,11 +180,12 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
         // Re-check changed market/volume context as well as the price.
         const freshContext={...context,change24h:current?.percent_change_24h??context.change24h,change7d:current?.percent_change_7d??context.change7d,volumeChange24h:current?.volume_change_24h??context.volumeChange24h};
         evidence.find(x=>x.id===a.id)!.dispatch_quote=current??null;
-        const verified=evaluateEntry(points,current?.price,current?.last_updated,Date.now(),freshContext);
-        dispatchDecision.verification=verified.reason;
-        if (!verified.plan || current.price<plan.entry || current.price>plan.max) {
+        const verified=evaluateEntry(points,current?.price,current?.last_updated,Date.now(),freshContext,shortPoints??undefined);
+        dispatchDecision.verification=!Number.isFinite(current?.volume_24h) || current.volume_24h<5_000_000 ? "liquidity_floor" : verified.plan && verified.plan.setup_at!==plan.setup_at ? "changed_setup" : verified.reason;
+        if (!verified.plan || verified.plan.setup_at!==plan.setup_at || current.price<plan.min || current.price>plan.max
+          || !Number.isFinite(current.volume_24h) || current.volume_24h<5_000_000) {
           dispatchDecision.reason="pre_send_rejected";
-          await audit({id:a.id,mode,outcome:"pre_send_rejected",reason:verified.reason,price:current?.price??null});
+          await audit({id:a.id,mode,outcome:"pre_send_rejected",reason:dispatchDecision.verification,price:current?.price??null});
           continue;
         }
         plan.quote_at=current.last_updated;
@@ -208,7 +221,7 @@ export class ObservationScanner extends DurableObject<ScanEnv> {
       await record({ mode, universe:normalized.length, market:marketSummary, news_checked:publications.filter(x=>x.evidence.status!=="unsupported").length, eligible:eligible.length, decisions, candidates: candidates.length, attempts, sent, reserved_today: sentToday, fresh_quotes_today:freshToday, ok: mode === "paper" || sent === attempts, outcome: mode === "paper" ? "simulation" : attempts === 0 ? "no_alert" : sent === attempts ? "sent" : "delivery_unconfirmed" });
     } catch (error) {
       if (snapshot) snapshot.failure={stage,kind:error instanceof ScanRequestError?error.kind:"internal"};
-      await record({ ok: false, outcome: "data_error", stage, kind: error instanceof ScanRequestError ? error.kind : "internal", ...(error instanceof ScanRequestError && error.code !== undefined ? { code: error.code } : {}) });
+      await record({ ok: false, outcome: "data_error", stage, ...(stage==="history"?{history_interval:historyInterval}:{}), kind: error instanceof ScanRequestError ? error.kind : "internal", ...(error instanceof ScanRequestError && error.code !== undefined ? { code: error.code } : {}) });
     } finally {
       if (snapshot) {
         snapshot.cmc_credits=credits;
