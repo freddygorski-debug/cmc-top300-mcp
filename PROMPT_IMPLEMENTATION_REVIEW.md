@@ -15,6 +15,6 @@ Statut : proposition du 7 octobre 2026. La production conserve entry-v5. Cette r
 | Cotation finale | Quote relue, même support, zone inchangée, volume ≥5 M USD | Prix CMC non exécutable |
 | Une alerte sans suivi | Pas de position, aucun suivi ni renforcement | Cooldown/déduplication conservés |
 | Horaires et budget | 9–23 Paris, scan 15 min, caps existants | Quotas peuvent limiter les envois |
-| Qualité | 65 tests + TypeScript, replay figé production/brouillon/correction | Trois signaux : un objectif observé, deux invalidations ; présélection modifiée testée fonctionnellement seulement ; aucune efficacité démontrée |
+| Qualité | 66 tests + TypeScript, replay figé production/brouillon/correction | Trois signaux : un objectif observé, deux invalidations ; présélection modifiée testée fonctionnellement seulement ; aucune efficacité démontrée |
 
 Le texte pose trois questions, mais les seuils nécessaires à leur traduction sont explicités dans ENTRY_DESIGN.md. La nouvelle présélection de configurations, les volumes à cinq minutes et les prix Neverless ne sont pas implémentés ni prétendus disponibles. Ne pas présenter le candidat comme prêt à activer sur le seul fondement des tests logiciels.

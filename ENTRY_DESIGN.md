@@ -3,6 +3,8 @@
 Le prompt SCAN_PROMPT_V2.md décrit cette version de travail, issue du Scan 5 % personnel.
 Production conservée : entry-v5, commit 9414c22. Aucun secret, route ou configuration réseau modifié.
 
+Outil de lecture ajouté pour les comparaisons en prévisualisation : get_cmc_intraday_5m (jusqu'à dix IDs, une heure par défaut, vingt-quatre maximum). Il reprend le même endpoint CMC et ne déclenche ni scan ni message Telegram. Les outils existants sont conservés. Une variation calculée est absente (null) en cas d'intervalle manquant plutôt que d'être présentée comme une variation cinq minutes.
+
 ## Trois décisions techniques
 
 1. Reprise ou cassure : support = dernier creux local confirmé dans les quatre dernières mesures historiques ; le prix courant peut confirmer le dernier creux, mais aucune donnée future n'est utilisée. Un nouveau creux supérieur remplace l'ancien plus bas horaire. Le minimum des cinq prix de la dernière heure sert seulement de repli pour une base sans creux récent confirmé. Une reprise après ce creux ou une sortie du plafond des quatre prix précédents peut déclencher l'examen. Une petite baisse live est tolérée jusqu'à 0,15 % uniquement si le dernier échantillon avait monté. Aucun rejet automatique de toute bougie historique rouge.
@@ -31,7 +33,7 @@ Protections inchangées : 9–23 Paris/DST, deux tentatives/run, dix/jour, dix q
 
 ## Évaluation
 
-65 tests réussis, TypeScript et diff vérifiés. Tests couvrant petite respiration, vraie baisse, rupture du creux, résistance mineure/significative, risque, données périmées, relecture du prix et du volume avant envoi, absence de doublons et de suivi, limites quotidiennes et heures. Le test de support démontre qu'un creux supérieur confirmé remplace l'ancien plancher horaire sans élargir le risque. Le test de présélection vérifie les places de stabilisation, l'absence de priorité de l'ancien radar et la comparaison de listings réellement renouvelés. Il ne mesure pas l'efficacité sur les 300 actifs en production.
+66 tests réussis, TypeScript et diff vérifiés. Tests couvrant petite respiration, vraie baisse, rupture du creux, résistance mineure/significative, risque, données périmées, relecture du prix et du volume avant envoi, absence de doublons et de suivi, limites quotidiennes et heures. Le test de support démontre qu'un creux supérieur confirmé remplace l'ancien plancher horaire sans élargir le risque. Le test de présélection vérifie les places de stabilisation, l'absence de priorité de l'ancien radar et la comparaison de listings réellement renouvelés. Il ne mesure pas l'efficacité sur les 300 actifs en production.
 
 Replay élargi demandé par l'utilisateur : 26 séries sur 25 actifs distincts, 977 décisions éligibles par version. Production zéro signal ; premier brouillon un PUMP invalidé ; brouillon corrigé trois signaux dont un RAY avec objectif observé et deux invalidés. Tous les signaux se situent dans les sept historiques initiaux ; douze actifs nouveaux choisis par rang avant lecture des résultats et sept séries d'archives ne donnent aucun signal. Même proxy de quote, mêmes horaires et dedupe. Données quotidiennes historiques et contexte BTC manquants omis dans les versions. Ni présélection globale ni exécution Neverless reproduites. Résultats enregistrés avec hash des trois moteurs dans outputs/simplified-expanded-comparison.json du workspace parent.
 
