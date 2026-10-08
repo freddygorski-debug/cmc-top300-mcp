@@ -64,3 +64,12 @@ test('a price now falling on five-minute observations does not qualify on an old
  const p=history(prices),short=[100,100.1,100.2,100.3,100.5,100.7,100.6].map((price,i)=>({price,timestamp:new Date(now-(6-i)*300000).toISOString()}));
  assert.equal(evaluate(p,100.3,at,now,{},short).reason,'recovery_fading');
 });
+
+
+test('a bounded pause can qualify as continuation without inventing a fresh trough',()=>{
+ const p=history(prices),short=[100,100.1,100.2,100.3,100.5,100.4,100.38].map((price,i)=>({price,timestamp:new Date(now-(6-i)*300000).toISOString()}));
+ const d=evaluate(p,100.37,at,now,{},short);
+ assert.ok(d.plan);assert.equal(d.plan.pattern,'continuation');
+ assert.ok(d.plan.stop<d.plan.min);assert.ok(1-d.plan.stop/d.plan.max<=.02);
+ assert.equal(evaluate(p,100.1,at,now,{},short).plan,null);
+});
