@@ -10,11 +10,12 @@ function setup() {
   const source = (fs.readFileSync('src/telegram.ts', 'utf8') + '\n' + fs.readFileSync('src/index.ts', 'utf8')).replace(/^import .*;\r?\n/gm, '');
   const calls = [];
   const tools = [];
+  const registry = new Map();
   let telegramResponse = Response.json({ ok: true });
   const context = {
-    ObservationScanner: class {}, exports: {}, z, env: {}, Request, Response, URL, TextEncoder, TextDecoder,
+    ObservationScanner: class {}, exports: {}, z, env: {}, Request, Response, URL, URLSearchParams, TextEncoder, TextDecoder,
     Uint8Array, AbortSignal, crypto: globalThis.crypto,
-    McpServer: class { registerTool(name) { tools.push(name); } },
+    McpServer: class { registerTool(name,options,callback) { tools.push(name); registry.set(name,{options,callback}); } },
     createMcpHandler: create => { create(); return () => Response.json({ mcp: true }); },
     fetch: async (...args) => { calls.push(args); if (telegramResponse instanceof Error) throw telegramResponse; return telegramResponse; },
   };
@@ -25,17 +26,34 @@ function setup() {
   const request = (body = payload, options = {}) => new Request('https://worker.test/telegram/alert', {
     method: 'POST', headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), ...options,
   });
-  return { calls, tools, env, payload, request, run: req => context.exports.default.fetch(req, env, {}), fail: value => { telegramResponse = value; } };
+  return { calls, tools, registry, env, payload, request, run: req => context.exports.default.fetch(req, env, {}), fail: value => { telegramResponse = value; }, cmc:()=>{context.env.CMC_API_KEY='fake-cmc';} };
 }
 
 test('authenticated alert sends the structured message; CMC tools remain registered', async () => {
   const s = setup();
-  assert.deepEqual(s.tools, ['get_cmc_top_300', 'get_cmc_intraday_15m']);
+  assert.deepEqual(s.tools, ['get_cmc_top_300', 'get_cmc_intraday_15m', 'get_cmc_intraday_5m']);
   const response = await s.run(s.request());
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('Cache-Control'), 'no-store');
   assert.deepEqual(await response.json(), { ok: true, sent: true });
   assert.equal(JSON.parse(s.calls[0][1].body).text, '🚨 ALERTE CRYPTO\n\nCrypto : BTC\nStatut : Actif\nPrix : 100\nSignal : Hausse\nTP : 102 USD\nSL : 98\nMotif : Momentum');
+});
+
+test('read-only five-minute tool requests real interval, limits assets and never calls Telegram',async()=>{
+ const s=setup();s.cmc();const tool=s.registry.get('get_cmc_intraday_5m');
+ const args=tool.options.inputSchema.parse({ids:'8526'});assert.equal(args.hours,1);
+ s.fail(Response.json({status:{error_code:0},data:{8526:{id:8526,quotes:[
+  {timestamp:'2026-10-07T10:00:00Z',quote:{USD:{price:100}}},
+  {timestamp:'2026-10-07T10:05:00Z',quote:{USD:{price:101}}},
+  {timestamp:'2026-10-07T10:15:00Z',quote:{USD:{price:103}}}
+ ]}}}));
+ const result=await tool.callback(args),body=JSON.parse(result.content[0].text);
+ assert.equal(body.interval,'5m');assert.equal(body.assets[0].points[1].change_5m_pct,1);
+ assert.equal(body.assets[0].points[2].change_5m_pct,null);
+ assert.equal(new URL(s.calls[0][0]).searchParams.get('interval'),'5m');
+ assert.ok(s.calls.every(x=>x[0].startsWith('https://pro-api.coinmarketcap.com/')));
+ const before=s.calls.length;const cap=await tool.callback({ids:Array.from({length:11},(_,i)=>i+1).join(','),hours:1});
+ assert.equal(cap.isError,true);assert.equal(s.calls.length,before);
 });
 
 test('invalid requests never send', async () => {

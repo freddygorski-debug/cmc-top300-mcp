@@ -286,11 +286,11 @@ function createServer() {
    * ============================================================
    */
 
-  server.registerTool(
-    "get_cmc_intraday_15m",
+  for (const interval of ["15m","5m"] as const) server.registerTool(
+    interval === "15m" ? "get_cmc_intraday_15m" : "get_cmc_intraday_5m",
     {
       description:
-        "Retrieve recent 15-minute CoinMarketCap historical quote points for selected cryptocurrencies. Designed to detect acceleration, stabilization, higher lows and early bullish momentum after a Top 300 volatility scan.",
+        `Retrieve recent ${interval} sampled CoinMarketCap prices for selected IDs. Prices are not OHLC candles or executable quotes. Maximum ${interval === "15m" ? 30 : 10} assets per call.`,
 
       inputSchema: z.object({
         ids: z
@@ -304,9 +304,9 @@ function createServer() {
           .int()
           .min(1)
           .max(24)
-          .default(6)
+          .default(interval === "15m" ? 6 : 1)
           .describe(
-            "Number of recent hours to retrieve. Default 6, maximum 24.",
+            `Number of recent hours. Default ${interval === "15m" ? 6 : 1}, maximum 24.`,
           ),
       }),
     },
@@ -339,11 +339,11 @@ function createServer() {
          * We deliberately limit one request to 30 candidates.
          * The Top 300 tool performs the broad scan first.
          */
-        if (cleanIds.length > 30) {
+        if (cleanIds.length > (interval === "15m" ? 30 : 10)) {
           return errorContent({
             ok: false,
             error:
-              "Maximum 30 cryptocurrencies per intraday request. Run the Top 300 volatility filter first.",
+              `Maximum ${interval === "15m" ? 30 : 10} cryptocurrencies per intraday request.`,
           });
         }
 
@@ -356,7 +356,7 @@ function createServer() {
         const params = new URLSearchParams({
           id: cleanIds.join(","),
           convert: "USD",
-          interval: "15m",
+          interval,
           time_start: start.toISOString(),
           time_end: now.toISOString(),
         });
@@ -459,7 +459,7 @@ function createServer() {
 
               if (
                 previous?.price_usd &&
-                point?.price_usd
+                point?.price_usd && Math.abs(Date.parse(point.timestamp)-Date.parse(previous.timestamp)-(interval === "15m" ? 900000 : 300000))<=60000
               ) {
                 change15m =
                   ((point.price_usd -
@@ -470,7 +470,7 @@ function createServer() {
 
               return {
                 ...point,
-                change_15m_pct: change15m,
+                [interval === "15m" ? "change_15m_pct" : "change_5m_pct"]: change15m,
               };
             },
           );
@@ -491,7 +491,7 @@ function createServer() {
                 {
                   ok: true,
                   source: "CoinMarketCap",
-                  interval: "15m",
+                  interval,
                   requested_hours: hours,
                   requested_assets:
                     cleanIds.length,

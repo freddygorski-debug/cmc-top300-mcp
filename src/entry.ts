@@ -1,67 +1,71 @@
-// CMC samples are prices, not OHLC or executable Neverless quotes.
+// Sampled CMC prices, never OHLC candles or executable Neverless quotes.
 export type EntryPoint = { timestamp: string; price: number };
 export type EntryContext = { change24h?: number; change7d?: number; volumeChange24h?: number; market1h?: number };
-export type EntryPlan = { version: "entry-v5"; pattern?: "pullback" | "breakout" | "continuation"; target_basis?: "sampled_resistance" | "prior_leg_projection"; observed_at: string; quote_at: string; entry: number; min: number; max: number; target: number; stop: number; valid_until: string; support?: number; resistance?: number; risk_reward?: number; setup_at?: string };
+export type EntryPlan = { version: "entry-v6"; pattern?: "pullback" | "breakout" | "continuation"; target_basis?: "sampled_resistance" | "prior_leg_projection"; observed_at: string; quote_at: string; entry: number; min: number; max: number; target: number; stop: number; valid_until: string; support?: number; resistance?: number; risk_reward?: number; setup_at?: string };
 export const ENTRY_POLICY = { gross: 0.0255, spread: 0.005, loss: 0.02, validityMinutes: 15 } as const;
 export type EntryDecision = { plan: EntryPlan | null; reason: string; metrics?: Record<string, number | null> };
-export function evaluateEntry(points: EntryPoint[], live: number, liveAt: string, now: number, context: EntryContext = {}): EntryDecision {
-  const reject = (reason: string, metrics?: Record<string, number | null>): EntryDecision => ({ plan: null, reason, metrics });
-  if (points.length < 17 || !Number.isFinite(live) || live <= 0) return reject("insufficient_data");
-  const p = points.slice(-96), times = p.map(x => Date.parse(x.timestamp));
-  if (p.some(x => !Number.isFinite(x.price) || x.price <= 0) || times.some(t => !Number.isFinite(t))
-    || times.slice(1).some((t,i) => Math.abs(t-times[i]-900000)>60000)) return reject("invalid_history");
-  const quoteAt = Date.parse(liveAt), last = p[p.length-1]!.price;
-  if (now-times[times.length-1]! > 20*60000 || now < times[times.length-1]!
-    || !Number.isFinite(quoteAt) || now-quoteAt > 5*60000 || quoteAt > now || quoteAt < times[times.length-1]!) return reject("stale_data");
-  if (live < last) return reject("live_price_fading", { live, last });
-  const hour = p.slice(-5), base = p.slice(-9,-1);
-  const ceiling = Math.max(...base.map(x=>x.price)), floor = Math.min(...base.map(x=>x.price));
-  const change4h = live/p[p.length-17]!.price-1, change1h = live/hour[0].price-1, range = ceiling/floor-1;
-  const tail=p.slice(-17);
-  const volatility = tail.slice(1).map((x,i)=>Math.abs(x.price/tail[i].price-1)).sort((a,b)=>a-b);
-  const typical = volatility[Math.floor(volatility.length/2)], extension = live/last-1;
-  const metrics = { live, last, change1h, change4h, range, typical, extension, change24h: context.change24h ?? null,
-    change7d: context.change7d ?? null, volumeChange24h: context.volumeChange24h ?? null, market1h: context.market1h ?? null };
-  if (extension > Math.min(0.015,Math.max(0.004,typical*2))) return reject("extended_since_sample",metrics);
-  if (context.volumeChange24h !== undefined && context.volumeChange24h < -20) return reject("declining_rolling_volume",metrics);
-  const before = p[p.length-3]!.price, low = p[p.length-2]!.price;
-  const pivots=p.slice(1,-2).map((x,i)=>({index:i+1,price:x.price,kind:x.price<p[i].price && x.price<=p[i+2].price?"low":x.price>p[i].price && x.price>=p[i+2].price?"high":"none"})).filter(x=>x.kind!=="none");
-  const previousLow=pivots.filter(x=>x.kind==="low").slice(-1)[0];
-  const olderLow=pivots.filter(x=>x.kind==="low").slice(-2,-1)[0];
-  const pullback = low < before && last > low && !!previousLow && low>previousLow.price;
-  // Hourly return describes context; a fresh higher-low recovery can still have a negative hour.
-  if (last<low) return reject("sampled_price_fading",metrics);
-  const recentBase=p.slice(-5,-1), recentCeiling=Math.max(...recentBase.map(x=>x.price)), recentFloor=Math.min(...recentBase.map(x=>x.price));
-  const breakout = live > ceiling && live/ceiling-1 <= Math.max(0.006,typical*2) && range >= 0.003;
-  const startBreakout=live>recentCeiling && recentCeiling/recentFloor-1<=0.008 && last>=low && live/recentFloor-1<=0.012;
-  if (!pullback && !breakout && !startBreakout) return reject("no_entry_setup",metrics);
-  const constructiveRecovery=pullback && !!olderLow && previousLow!.price>olderLow.price;
-  if ((change4h < -0.005 && !constructiveRecovery) || (context.change24h !== undefined && context.change24h < -3 && change4h<0 && !constructiveRecovery)) return reject("weak_broader_structure",metrics);
-  const support = pullback ? low : startBreakout ? recentFloor : floor;
-  const advance=live/support-1;
-  if (advance>0.012) return reject("entry_leg_already_advanced",{...metrics,advance});
-  const min = live*0.9985, max = live*1.0015, target = max*(1+ENTRY_POLICY.gross);
-  const stop = support*(1-Math.max(0.002,Math.min(0.004,typical)));
-  if (stop >= min || 1-stop/max > ENTRY_POLICY.loss) return reject("technical_stop_exceeds_risk",metrics);
-  const peaks = p.slice(1,-2).filter((x,i)=>x.price>p[i].price && x.price>p[i+2].price && x.price>max);
-  const resistance = peaks.length ? Math.min(...peaks.map(x=>x.price)) : undefined;
-  if (resistance !== undefined && target > resistance*0.998) return reject("insufficient_room_before_resistance",{...metrics,resistance,target});
-  // In price discovery, only a completed earlier leg can support a provisional projection.
-  // The current four-hour advance is never used as evidence of future target room.
-  let targetBasis:EntryPlan["target_basis"]="sampled_resistance";
-  if (resistance === undefined) {
-    const high=pivots.filter(x=>x.kind==="high" && (!previousLow || x.index<previousLow.index)).slice(-1)[0];
-    const bottom=high?pivots.filter(x=>x.kind==="low" && x.index<high.index).slice(-1)[0]:undefined;
-    const amplitude=high && bottom?high.price/bottom.price-1:0;
-    if (!pullback || !high || !bottom || !previousLow || previousLow.price<=bottom.price || amplitude<ENTRY_POLICY.gross*1.25 || advance>amplitude*0.25) return reject("unverified_target_room",{...metrics,amplitude,advance});
-    targetBasis="prior_leg_projection";
-  }
-  const riskReward = (target-max)/(max-stop);
-  const pattern = pullback ? "pullback" : change4h > 0.015 ? "continuation" : "breakout";
-  return { reason: "qualified", metrics, plan: { version:"entry-v5",pattern,target_basis:targetBasis,observed_at:new Date(now).toISOString(),quote_at:liveAt,
-    entry:live,min,max,target,stop,support,resistance,risk_reward:riskReward,setup_at:pullback?p[p.length-2].timestamp:p.find(x=>x.price===support)!.timestamp,
-    valid_until:new Date(now+ENTRY_POLICY.validityMinutes*60000).toISOString() } };
+export function evaluateEntry(points: EntryPoint[], live: number, liveAt: string, now: number, context: EntryContext = {}, shortPoints?: EntryPoint[]): EntryDecision {
+ const reject=(reason:string,metrics?:Record<string,number|null>):EntryDecision=>({plan:null,reason,metrics});
+ if(points.length<17 || !Number.isFinite(live) || live<=0)return reject("insufficient_data");
+ const p=points.slice(-96),times=p.map(x=>Date.parse(x.timestamp)),quoteAt=Date.parse(liveAt);
+ if(p.some(x=>!Number.isFinite(x.price)||x.price<=0)||times.some(x=>!Number.isFinite(x))||times.slice(1).some((t,i)=>Math.abs(t-times[i]-900000)>60000))return reject("invalid_history");
+ if(!Number.isFinite(now)||now<times[times.length-1]||now-times[times.length-1]>1200000||!Number.isFinite(quoteAt)||quoteAt>now||now-quoteAt>300000||quoteAt<times[times.length-1])return reject("stale_data");
+ let timing=p;
+ if(shortPoints!==undefined){
+  timing=shortPoints.slice(-7);
+  const shortTimes=timing.map(x=>Date.parse(x.timestamp));
+  if(timing.length<6 || timing.some(x=>!Number.isFinite(x.price)||x.price<=0) || shortTimes.some(x=>!Number.isFinite(x))
+    || shortTimes.slice(1).some((t,i)=>Math.abs(t-shortTimes[i]-300000)>60000))return reject("invalid_short_history");
+  if(now<shortTimes[shortTimes.length-1] || now-shortTimes[shortTimes.length-1]>600000 || quoteAt<shortTimes[shortTimes.length-1])return reject("stale_short_history");
+ }
+ const last=timing[timing.length-1].price;
+ // Merge observed prices for levels only. Validate each resolution separately;
+ // never fill gaps or manufacture 5-minute samples from 15-minute prices.
+ const structure=shortPoints===undefined?p:p.filter(x=>Date.parse(x.timestamp)<Date.parse(timing[0].timestamp)).concat(timing);
+ const observed=structure.concat({timestamp:liveAt,price:live});
+ const pivots=observed.slice(1,-1).map((x,i)=>({index:i+1,price:x.price,kind:x.price<observed[i].price&&x.price<=observed[i+2].price?"low":x.price>observed[i].price&&x.price>=observed[i+2].price?"high":"none"})).filter(x=>x.kind!=="none");
+ // A recent trough supplies a technical support, not proof of a new wave. The old hourly floor is only
+ // a fallback for a flat base without a confirmed recent trough.
+ const recent=timing.slice(-5),floor=Math.min(...recent.map(x=>x.price));
+ const trough=pivots.filter(x=>x.kind==="low"&&x.index>=structure.length-4).slice(-1)[0];
+ const support=trough?.price??floor,supportIndex=trough?.index??structure.map(x=>x.price).lastIndexOf(floor),supportAt=structure[supportIndex].timestamp;
+ const tail=p.slice(-17),returns=tail.slice(1).map((x,i)=>Math.abs(x.price/tail[i].price-1)).sort((a,b)=>a-b),typical=returns[Math.floor(returns.length/2)];
+ const advance=live/support-1,ceiling=Math.max(...timing.slice(-5,-1).map(x=>x.price));
+ const metrics:Record<string,number|null>={live,last,support,advance,typical,timing_minutes:shortPoints===undefined?15:5,change1h:live/p[p.length-5].price-1,change4h:live/p[p.length-17].price-1,change24h:context.change24h??null,change7d:context.change7d??null,volumeChange24h:context.volumeChange24h??null,market1h:context.market1h??null};
+ // 1. A restart, not a falling price. Tolerate a small dip only after a rise.
+ if(live<=support)return reject("support_not_recovered",metrics);
+ const localRecovery=live>timing[0].price && live>floor*1.0015;
+ if(live<last && !(live>=last*.9985 && (last>timing[timing.length-2].price || (shortPoints!==undefined && localRecovery))))return reject("recovery_fading",metrics);
+ const breakout=live>ceiling && ceiling/support-1<=.015;
+ const pullback=supportIndex>=structure.length-4 && advance>=.0015;
+ const continuation=shortPoints!==undefined && localRecovery && advance>=.0015;
+ if(!breakout&&!pullback&&!continuation)return reject("no_entry_setup",metrics);
+ // 2. Structural risk: never move the stop down to force qualification.
+ const min=live*.9985,max=live*1.0015,target=max*(1+ENTRY_POLICY.gross),stop=support*(1-Math.max(.002,Math.min(.004,typical)));
+ if(stop>=min || 1-stop/max>ENTRY_POLICY.loss)return reject("technical_stop_exceeds_risk",metrics);
+ // 3. A resistance must have caused a meaningful (1%) sampled retreat.
+ const previousLow=pivots.filter(x=>x.kind==="low"&&x.index<supportIndex).slice(-1)[0];
+ if(previousLow && support<previousLow.price && live<=Math.max(...timing.slice(-3,-1).map(x=>x.price)))return reject("broken_recovery_structure",metrics);
+ const peaks=pivots.filter(x=>{
+  const after=pivots.find(y=>y.kind==="low"&&y.index>x.index);
+  const retreat=after?.price??Math.min(...observed.slice(x.index+1).map(y=>y.price));
+  return x.kind==="high" && x.price>max && x.price/retreat-1>=.01;
+ });
+ const resistance=peaks.length?Math.min(...peaks.map(x=>x.price)):undefined;
+ if(resistance!==undefined && target>resistance*.998)return reject("insufficient_room_before_resistance",{...metrics,resistance,target});
+ const completed=pivots.filter(x=>x.kind==="high"&&x.index<supportIndex).map(high=>{
+  const low=pivots.filter(x=>x.kind==="low"&&x.index<high.index).slice(-1)[0];
+  const after=pivots.filter(x=>x.kind==="low"&&x.index>high.index&&x.index<=supportIndex).find(x=>high.price/x.price-1>=.005);
+  return {high,low,after,amplitude:low?high.price/low.price-1:0};
+ }).filter(x=>x.low && x.after && x.after.price>x.low.price && support>=x.after.price);
+ const prior=completed.slice(-1)[0],amplitude=prior?.amplitude??0;
+ let basis:EntryPlan["target_basis"]="sampled_resistance";
+ if(resistance===undefined){
+  if(amplitude<ENTRY_POLICY.gross*1.1)return reject("unverified_target_room",{...metrics,amplitude});
+  basis="prior_leg_projection";
+ }
+ // Projection limits extension only when no observed resistance supports the target.
+ if(resistance===undefined && amplitude>=ENTRY_POLICY.gross*1.1 && advance>amplitude*.35)return reject("entry_leg_already_advanced",{...metrics,amplitude});
+ return {reason:"qualified",metrics,plan:{version:"entry-v6",pattern:pullback?"pullback":breakout?"breakout":"continuation",target_basis:basis,observed_at:new Date(now).toISOString(),quote_at:liveAt,entry:live,min,max,target,stop,support,resistance,risk_reward:(target-max)/(max-stop),setup_at:supportAt,valid_until:new Date(now+ENTRY_POLICY.validityMinutes*60000).toISOString()}};
 }
-export function entryPlan(points: EntryPoint[], live: number, liveAt: string, now: number, context?: EntryContext): EntryPlan | null {
-  return evaluateEntry(points,live,liveAt,now,context).plan;
-}
+export function entryPlan(points:EntryPoint[],live:number,liveAt:string,now:number,context?:EntryContext):EntryPlan|null {return evaluateEntry(points,live,liveAt,now,context).plan;}

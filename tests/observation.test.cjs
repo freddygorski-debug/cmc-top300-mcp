@@ -11,6 +11,7 @@ function setup(enabled = true, live = true, start = Date.parse("2026-10-07T10:00
   const storage = new Map(); const calls = []; const messages = []; const logs = [];
   const prices = [98,99,98,100,101,104,99,99,99,99.5,100,99.9,99.8,100,100.1,100,100.5];
   const points = prices.map((price, i) => ({ timestamp: new Date(now - (prices.length-1-i)*900000).toISOString(), price }));
+  const shortPoints=[100,100,100.1,100.2,100.3,100,100.5].map((price,i)=>({timestamp:new Date(now-(6-i)*300000).toISOString(),price}));
   const ctx = { storage: { get: async key => storage.get(key), delete: async key => storage.delete(key), put: async (key, value) => {
     if (typeof key === 'string') storage.set(key, value); else Object.entries(key).forEach(([k,v])=>storage.set(k,v));
   } } };
@@ -21,11 +22,11 @@ function setup(enabled = true, live = true, start = Date.parse("2026-10-07T10:00
     console: { log: text => logs.push(JSON.parse(text)) },
     DurableObject: class { constructor(ctx, env) { this.ctx = ctx; this.env = env; } },
     sendTelegram: async (env, text) => { messages.push(text); return true; },
-    fetch: async url => { calls.push(url); return { ok: true, json: async () => ({ status: {error_code:0}, data: url.includes('listings') ? [listing] : url.includes('quotes/latest') ? {1:listing} : { 1: { id: 1, quotes: points.map(x => ({ timestamp:x.timestamp, quote:{USD:{price:x.price}} })) } } }) }; },
+    fetch: async url => { calls.push(url); return { ok: true, json: async () => ({ status: {error_code:0}, data: url.includes('listings') ? [listing] : url.includes('quotes/latest') ? {1:listing} : { 1: { id: 1, quotes: (url.includes('interval=5m')?shortPoints:points).map(x => ({ timestamp:x.timestamp, quote:{USD:{price:x.price}} })) } } }) }; },
   };
   const source = (fs.readFileSync('src/entry.ts','utf8')+'\n'+fs.readFileSync('src/selection.ts','utf8')+'\n'+fs.readFileSync('src/news.ts','utf8')+'\n'+fs.readFileSync('src/observation.ts','utf8')).replace(/^import .*;\r?\n/gm,'');
   vm.runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,context);
-  return { ...context.exports, scanner: new context.exports.ObservationScanner(ctx, env), now, storage, calls, messages, points, listing, logs,
+  return { ...context.exports, scanner: new context.exports.ObservationScanner(ctx, env), now, storage, calls, messages, points, shortPoints, listing, logs,
     mapResponse: transform => { const original = context.fetch; context.fetch = async url => { const response = await original(url); const body = await response.json(); return { ...response, json: async () => transform(body) }; }; },
     setFetch: fetch => { context.fetch = fetch; }, setSignal: signal => { context.AbortSignal = { timeout: () => signal }; },
     setClock: at => { clock = at; }, setPut: put => { ctx.storage.put=put; }, restart: () => new context.exports.ObservationScanner(ctx, env), failSend: () => { context.sendTelegram = async () => false; } };
@@ -86,6 +87,25 @@ test('ten places all explore current opportunities and rotate without hourly vet
  assert.equal(b.candidates[0].id,5);
 });
 
+test('a small recovery outranks a large rebound and two slots inspect stabilising declines instead of old radar membership',()=>{
+ const s=setup(),assets=Array.from({length:20},(_,i)=>({...s.listing,id:i+1,symbol:'X'+i,quote:{USD:{...s.listing.quote.USD,price:100}}})),previous={};
+ for(const a of assets)previous[a.id]={price:100,at:s.now-900000,delta:.01};
+ for(const id of [5,6,7,8]){previous[id].price=99.5;previous[id].delta=-.005;}
+ previous[19].price=100.05;previous[19].delta=-.01;
+ previous[20].price=100.1;previous[20].delta=-.01;
+ previous[18].price=98;previous[18].delta=-.03;
+ const result=s.selectEntryCandidates(assets,previous,{9:s.now,10:s.now},0,s.now);
+ assert.equal(result.candidates.length,10);
+ assert.equal(result.selection.find(x=>x.id===19).selection,'recent_stabilisation_hint');
+ assert.equal(result.selection.find(x=>x.id===20).selection,'recent_stabilisation_hint');
+ assert.equal(result.selection.find(x=>x.id===18).selection,'not_selected_capacity');
+ assert.equal(result.selection.find(x=>x.id===9).selection,'not_selected_capacity');
+ assets[18].quote.USD.last_updated=new Date(s.now-900000).toISOString();
+ const stale=s.selectEntryCandidates(assets,previous,{},0,s.now);
+ assert.equal(stale.selection.find(x=>x.id===19).recent_change,null);
+ assert.notEqual(stale.selection.find(x=>x.id===19).selection,'recent_stabilisation_hint');
+});
+
 test('a higher-low early recovery can qualify despite a negative sampled hour',()=>{
  const s=setup(),points=history(s,[98,99,98,100,104,103,102,101,100,99,100,105,103,100.5,100,99.7,100.1]);
  const d=s.evaluateEntry(points,100.1,new Date(s.now).toISOString(),s.now);
@@ -106,9 +126,9 @@ test('lower-low rebound, already-advanced leg and fresh sampled fall cannot beco
  const falling=history(s,[105,106,105,104,103,102,101,102,103,102,101,100,99,98,97,96,96.3]);
  assert.equal(s.evaluateEntry(falling,96.3,at,s.now).plan,null);
  const late=s.points.map(x=>({...x}));late[late.length-1].price=102;
- assert.equal(s.evaluateEntry(late,102,at,s.now).reason,'entry_leg_already_advanced');
+ assert.equal(s.evaluateEntry(late,102,at,s.now).reason,'technical_stop_exceeds_risk');
  const fade=s.points.map(x=>({...x}));fade[fade.length-1].price=99.9;
- assert.equal(s.evaluateEntry(fade,99.9,at,s.now).reason,'sampled_price_fading');
+ assert.equal(s.evaluateEntry(fade,99.9,at,s.now).plan,null);
 });
 
 test('history budget uses at most ten assets over four and a half hours and snapshots explain unselected assets',async()=>{
@@ -122,19 +142,43 @@ test('history budget uses at most ten assets over four and a half hours and snap
  assert.ok(snapshot.decisions.some(x=>x.reason==='insufficient_data'));
 });
 
+test('five-minute reads use one bounded daytime batch and retain both real resolutions',async()=>{
+ const s=setup();await s.scanner.run(Math.floor(s.now/900000));
+ const short=s.calls.filter(u=>u.includes('interval=5m'));assert.equal(short.length,1);
+ const url=new URL(short[0]);assert.equal(url.searchParams.get('count'),'7');assert.equal(url.searchParams.get('time_start'),null);
+ const snapshot=s.storage.get('scan_evidence')[0];assert.equal(snapshot.assets[0].short_points.length,7);
+ assert.equal(snapshot.assets[0].points.length,17);assert.equal(snapshot.decisions.find(d=>d.metrics)?.metrics.timing_minutes,5);
+});
+
+test('missing daytime short history suppresses delivery and records its explicit reason',async()=>{
+ const s=setup();s.shortPoints.length=0;await s.scanner.run(Math.floor(s.now/900000));
+ assert.equal(s.messages.length,0);assert.equal(s.storage.get('daily'),undefined);
+ assert.ok(s.storage.get('status').decisions.some(d=>d.reason==='invalid_short_history'));
+ assert.equal(s.calls.filter(u=>u.includes('quotes/latest')).length,0);
+});
+
+test('a failed five-minute request stops notifications and identifies the failing resolution without leaking upstream data',async()=>{
+ const s=setup();s.setFetch(async url=>{
+  if(url.includes('interval=5m'))return {ok:false,status:403};
+  return {ok:true,json:async()=>({data:url.includes('listings')?[s.listing]:{1:{id:1,quotes:s.points.map(p=>({timestamp:p.timestamp,quote:{USD:{price:p.price}}}))}}})};
+ });
+ await s.scanner.run(Math.floor(s.now/900000));assert.equal(s.messages.length,0);
+ const status=s.storage.get('status');assert.equal(status.outcome,'data_error');assert.equal(status.history_interval,'5m');assert.equal(status.code,403);
+});
+
 test('reported credits are audited and technical analysis still runs when notification capacity is occupied',async()=>{
  const s=setup();s.storage.set('daily',{day:new Date(s.now).toISOString().slice(0,10),count:10});
  s.mapResponse(body=>({...body,status:{...body.status,credit_count:Array.isArray(body.data)?2:1}}));
  await s.scanner.run(Math.floor(s.now/900000));
- assert.equal(s.messages.length,0);assert.equal(s.storage.get('status').cmc_credits,3);
- const snapshot=s.storage.get('scan_evidence')[0];assert.equal(snapshot.cmc_credits,3);
+ assert.equal(s.messages.length,0);assert.equal(s.storage.get('status').cmc_credits,4);
+ const snapshot=s.storage.get('scan_evidence')[0];assert.equal(snapshot.cmc_credits,4);
  assert.ok(snapshot.decisions.some(x=>x.reason==='qualified'));assert.ok(snapshot.decisions.some(x=>x.reason==='entry_capacity'));
 });
 test('disabled scanner makes no requests; enabled scanner serializes duplicate cron events and persists cooldown', async () => {
   const off=setup(false); await off.scanner.run(Math.floor(off.now/900000)); assert.equal(off.calls.length,0);
   const s=setup(); const slot=Math.floor(s.now/900000);
   await Promise.all([s.scanner.run(slot),s.scanner.run(slot)]);
-  assert.equal(s.calls.length,3); assert.equal(s.messages.length,1);
+  assert.equal(s.calls.length,4); assert.equal(s.messages.length,1);
   await s.scanner.run(slot+1); assert.equal(s.messages.length,1);
   assert.equal(s.storage.get('daily').count,1);
 });
@@ -221,10 +265,11 @@ test('legacy tracked scenarios are retired without assuming a sale or consuming 
  assert.equal(s.logs.some(x=>['target','invalidated','review_continues'].includes(x.outcome)),false);
 });
 
-test('v3 explains fading price, weak context and volume instead of notifying', () => {
+test('v6 tolerates a small supported dip and uses rolling volume and broad trend as context', () => {
   const s=setup(), at=new Date(s.now).toISOString();
-  assert.equal(s.evaluateEntry(s.points,100.4,at,s.now).reason,'live_price_fading');
-  assert.equal(s.evaluateEntry(s.points,100.5,at,s.now,{volumeChange24h:-34}).reason,'declining_rolling_volume');
+  assert.ok(s.evaluateEntry(s.points,100.4,at,s.now).plan);
+  assert.equal(s.evaluateEntry(s.points,100.2,at,s.now).reason,'recovery_fading');
+  assert.ok(s.evaluateEntry(s.points,100.5,at,s.now,{volumeChange24h:-34}).plan);
   assert.ok(s.evaluateEntry(s.points.map((x,i)=>({...x,price:i===0?100.5:x.price})),100.5,at,s.now,{change24h:-4}).plan); // Higher-low recovery is assessed, not vetoed by hourly context.
 });
 test('strong hourly movers are no longer excluded by the former four-percent cap', async () => {
@@ -232,15 +277,22 @@ test('strong hourly movers are no longer excluded by the former four-percent cap
   await s.scanner.run(Math.floor(s.now/900000)); assert.equal(s.storage.get('status').eligible,1);
 });
 test('quote deterioration immediately before send suppresses entry without reserving a send', async () => {
-  const s=setup(); s.mapResponse(body=>body.data?.[1]?.symbol ? {...body,data:{1:{...s.listing,quote:{USD:{...s.listing.quote.USD,price:100.4}}}}}:body);
+  const s=setup(); s.mapResponse(body=>body.data?.[1]?.symbol ? {...body,data:{1:{...s.listing,quote:{USD:{...s.listing.quote.USD,price:100.2}}}}}:body);
   await s.scanner.run(Math.floor(s.now/900000));
   assert.equal(s.messages.length,0); assert.equal(s.storage.get('daily'),undefined);
   assert.ok(s.storage.get('entry_audit').some(x=>x.outcome==='pre_send_rejected'));
 });
+
+test('a small fresh dip inside the original zone keeps the same valid setup and does not widen the zone',async()=>{
+ const s=setup();s.mapResponse(body=>body.data?.[1]?.symbol?{...body,data:{1:{...s.listing,quote:{USD:{...s.listing.quote.USD,price:100.4}}}}}:body);
+ await s.scanner.run(Math.floor(s.now/900000));assert.equal(s.messages.length,1);
+ const plan=s.storage.get('entry_audit').find(x=>x.outcome==='entry').plan;
+ assert.equal(plan.entry,100.5);assert.ok(plan.min<=100.4);assert.equal(plan.max,100.5*1.0015);
+});
 test('fresh quote budget is persistent even when entries are rejected', async () => {
  const s=setup(); s.storage.set('fresh_daily',{day:new Date(s.now).toISOString().slice(0,10),count:10});
  await s.scanner.run(Math.floor(s.now/900000));
- assert.equal(s.calls.length,2); assert.equal(s.messages.length,0);
+ assert.equal(s.calls.length,3); assert.equal(s.messages.length,0);
  assert.equal(s.storage.get('fresh_daily').count,10);
 });
 
@@ -264,7 +316,7 @@ test('optional publication lookup enriches a single entry or fails without block
     return new Response(`<rss><channel><item><title>Network launch</title><link>https://www.sui.io/blog/network-launch</link><pubDate>${new Date(s.now).toISOString()}</pubDate></item></channel></rss>`);
    }
    if (url.includes('quotes/latest')) assert.equal(newsSettled,true);
-   const data=url.includes('listings')?[s.listing]:url.includes('quotes/latest')?{20947:s.listing}:{20947:{id:20947,quotes:s.points.map(x=>({timestamp:x.timestamp,quote:{USD:{price:x.price}}}))}};
+   const data=url.includes('listings')?[s.listing]:url.includes('quotes/latest')?{20947:s.listing}:{20947:{id:20947,quotes:(url.includes('interval=5m')?s.shortPoints:s.points).map(x=>({timestamp:x.timestamp,quote:{USD:{price:x.price}}}))}};
    return {ok:true,json:async()=>({data})};
   });
   await s.scanner.run(Math.floor(s.now/900000));
@@ -276,11 +328,11 @@ test('optional publication lookup enriches a single entry or fails without block
   assert.equal(evidence.news.status,available?'recent_publication':'unavailable');
  }
 });
-test('a fresh deterioration in rolling volume cancels dispatch even at an unchanged price',async()=>{
- const s=setup(); s.mapResponse(body=>body.data?.[1]?.symbol?{...body,data:{1:{...s.listing,quote:{USD:{...s.listing.quote.USD,volume_change_24h:-40}}}}}:body);
+test('a fresh volume below the liquidity floor cancels dispatch at an unchanged price',async()=>{
+ const s=setup(); s.mapResponse(body=>body.data?.[1]?.symbol?{...body,data:{1:{...s.listing,quote:{USD:{...s.listing.quote.USD,volume_24h:4000000}}}}}:body);
  await s.scanner.run(Math.floor(s.now/900000));
  assert.equal(s.messages.length,0); assert.equal(s.storage.get('daily'),undefined);
- assert.ok(s.storage.get('entry_audit').some(x=>x.outcome==='pre_send_rejected' && x.reason==='declining_rolling_volume'));
+ assert.ok(s.storage.get('entry_audit').some(x=>x.outcome==='pre_send_rejected'));
 });
 test('evidence snapshots are bounded and distinguish actual history coverage from the universe',async()=>{
  const s=setup();s.storage.set('scan_evidence',Array.from({length:24},(_,i)=>({at:i})));
@@ -294,7 +346,7 @@ test('evidence snapshots are bounded and distinguish actual history coverage fro
 test('dispatch network failure preserves the observed inputs without reserving or leaking an entry',async()=>{
  const s=setup();s.setFetch(async url=>{
   if(url.includes('quotes/latest')) throw new Error('SECRET_REQUEST_FAILURE');
-  const data=url.includes('listings')?[s.listing]:{1:{id:1,quotes:s.points.map(x=>({timestamp:x.timestamp,quote:{USD:{price:x.price}}}))}};
+  const data=url.includes('listings')?[s.listing]:{1:{id:1,quotes:(url.includes('interval=5m')?s.shortPoints:s.points).map(x=>({timestamp:x.timestamp,quote:{USD:{price:x.price}}}))}};
   return {ok:true,json:async()=>({data})};
  });
  await s.scanner.run(Math.floor(s.now/900000));
@@ -317,8 +369,8 @@ test('night scan keeps the radar but makes no send reservation, fresh-quote requ
  assert.equal(s.calls.length,2);assert.equal(s.messages.length,0);assert.equal(s.storage.get('daily'),undefined);
  assert.equal(s.storage.get('fresh_daily'),undefined);assert.equal(s.storage.get('entries'),undefined);assert.ok(s.storage.get('radar')[1]);
  const morning=Date.parse('2026-10-08T07:00:00Z'),delta=morning-s.now;s.setClock(morning);
- s.points.forEach(x=>x.timestamp=new Date(Date.parse(x.timestamp)+delta).toISOString());s.listing.quote.USD.last_updated=new Date(morning).toISOString();
- s.listing.quote.USD.price=100.4;await s.restart().run(Math.floor(morning/900000));
+ s.points.forEach(x=>x.timestamp=new Date(Date.parse(x.timestamp)+delta).toISOString());s.shortPoints.forEach(x=>x.timestamp=new Date(Date.parse(x.timestamp)+delta).toISOString());s.listing.quote.USD.last_updated=new Date(morning).toISOString();
+ s.listing.quote.USD.price=100.2;await s.restart().run(Math.floor(morning/900000));
  assert.equal(s.messages.length,0); // New price fails: no replay of yesterday's qualified occasion.
 });
 test('night scan also retires legacy follow-up without issuing an entry or closure message',async()=>{
@@ -347,7 +399,7 @@ test('a candidate outside the four official sources receives optional press evid
   s.calls.push(url);
   if(url.startsWith('https://news.google.com/')){pressDone=true;return new Response(`<rss><channel><item><title>NEAR Protocol launches network upgrade</title><link>https://news.google.com/rss/articles/example</link><pubDate>${new Date(s.now).toISOString()}</pubDate><source url="https://www.coindesk.com">CoinDesk</source></item></channel></rss>`);}
   if(url.includes('quotes/latest'))assert.equal(pressDone,true);
-  const data=url.includes('listings')?[s.listing]:url.includes('quotes/latest')?{6535:s.listing}:{6535:{id:6535,quotes:s.points.map(x=>({timestamp:x.timestamp,quote:{USD:{price:x.price}}}))}};
+  const data=url.includes('listings')?[s.listing]:url.includes('quotes/latest')?{6535:s.listing}:{6535:{id:6535,quotes:(url.includes('interval=5m')?s.shortPoints:s.points).map(x=>({timestamp:x.timestamp,quote:{USD:{price:x.price}}}))}};
   return {ok:true,json:async()=>({data})};
  });
  await s.scanner.run(Math.floor(s.now/900000));assert.equal(s.messages.length,1);
@@ -368,11 +420,11 @@ test('sent alerts never occupy future slots; another asset may notify on the nex
  s.setFetch(async url=>{
   s.calls.push(url);
   const assets=[1,2,3].map(id=>({...s.listing,id,symbol:'X'+id}));
-  const data=url.includes('listings')?assets:url.includes('quotes/latest')?Object.fromEntries(assets.map(a=>[a.id,a])):Object.fromEntries(assets.map(a=>[a.id,{id:a.id,quotes:s.points.map(p=>({timestamp:p.timestamp,quote:{USD:{price:p.price}}}))}]));
+  const data=url.includes('listings')?assets:url.includes('quotes/latest')?Object.fromEntries(assets.map(a=>[a.id,a])):Object.fromEntries(assets.map(a=>[a.id,{id:a.id,quotes:(url.includes('interval=5m')?s.shortPoints:s.points).map(p=>({timestamp:p.timestamp,quote:{USD:{price:p.price}}}))}]));
   return {ok:true,json:async()=>({status:{error_code:0},data})};
  });
  await s.scanner.run(Math.floor(s.now/900000));assert.equal(s.messages.length,2);assert.equal(s.storage.get('entries'),undefined);
- const next=s.now+900000;s.setClock(next);s.points.forEach(p=>p.timestamp=new Date(Date.parse(p.timestamp)+900000).toISOString());s.listing.quote.USD.last_updated=new Date(next).toISOString();
+ const next=s.now+900000;s.setClock(next);s.points.forEach(p=>p.timestamp=new Date(Date.parse(p.timestamp)+900000).toISOString());s.shortPoints.forEach(x=>x.timestamp=new Date(Date.parse(x.timestamp)+900000).toISOString());s.listing.quote.USD.last_updated=new Date(next).toISOString();
  await s.restart().run(Math.floor(next/900000));assert.equal(s.messages.length,3);assert.ok(s.messages[2].includes('Crypto : X3'));
  assert.equal(s.storage.get('entries'),undefined);assert.equal(s.storage.get('daily').count,3);
  assert.equal(s.storage.get('status').candidates,3);assert.equal(s.storage.get('scan_evidence').at(-1).new_candidates,3);
