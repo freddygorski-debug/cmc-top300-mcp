@@ -24,7 +24,7 @@ export function evaluateEntry(points: EntryPoint[], live: number, liveAt: string
  const structure=shortPoints===undefined?p:p.filter(x=>Date.parse(x.timestamp)<Date.parse(timing[0].timestamp)).concat(timing);
  const observed=structure.concat({timestamp:liveAt,price:live});
  const pivots=observed.slice(1,-1).map((x,i)=>({index:i+1,price:x.price,kind:x.price<observed[i].price&&x.price<=observed[i+2].price?"low":x.price>observed[i].price&&x.price>=observed[i+2].price?"high":"none"})).filter(x=>x.kind!=="none");
- // A new confirmed trough starts a new wave. The old hourly floor is only
+ // A recent trough supplies a technical support, not proof of a new wave. The old hourly floor is only
  // a fallback for a flat base without a confirmed recent trough.
  const recent=timing.slice(-5),floor=Math.min(...recent.map(x=>x.price));
  const trough=pivots.filter(x=>x.kind==="low"&&x.index>=structure.length-4).slice(-1)[0];
@@ -34,16 +34,18 @@ export function evaluateEntry(points: EntryPoint[], live: number, liveAt: string
  const metrics:Record<string,number|null>={live,last,support,advance,typical,timing_minutes:shortPoints===undefined?15:5,change1h:live/p[p.length-5].price-1,change4h:live/p[p.length-17].price-1,change24h:context.change24h??null,change7d:context.change7d??null,volumeChange24h:context.volumeChange24h??null,market1h:context.market1h??null};
  // 1. A restart, not a falling price. Tolerate a small dip only after a rise.
  if(live<=support)return reject("support_not_recovered",metrics);
- if(live<last && !(live>=last*.9985 && last>timing[timing.length-2].price))return reject("recovery_fading",metrics);
+ const localRecovery=live>timing[0].price && live>floor*1.0015;
+ if(live<last && !(live>=last*.9985 && (last>timing[timing.length-2].price || (shortPoints!==undefined && localRecovery))))return reject("recovery_fading",metrics);
  const breakout=live>ceiling && ceiling/support-1<=.015;
  const pullback=supportIndex>=structure.length-4 && advance>=.0015;
- if(!breakout&&!pullback)return reject("no_entry_setup",metrics);
+ const continuation=shortPoints!==undefined && localRecovery && advance>=.0015;
+ if(!breakout&&!pullback&&!continuation)return reject("no_entry_setup",metrics);
  // 2. Structural risk: never move the stop down to force qualification.
  const min=live*.9985,max=live*1.0015,target=max*(1+ENTRY_POLICY.gross),stop=support*(1-Math.max(.002,Math.min(.004,typical)));
  if(stop>=min || 1-stop/max>ENTRY_POLICY.loss)return reject("technical_stop_exceeds_risk",metrics);
  // 3. A resistance must have caused a meaningful (1%) sampled retreat.
  const previousLow=pivots.filter(x=>x.kind==="low"&&x.index<supportIndex).slice(-1)[0];
- if(previousLow && support<previousLow.price && Number(metrics.change4h)<0)return reject("broken_recovery_structure",metrics);
+ if(previousLow && support<previousLow.price && live<=Math.max(...timing.slice(-3,-1).map(x=>x.price)))return reject("broken_recovery_structure",metrics);
  const peaks=pivots.filter(x=>{
   const after=pivots.find(y=>y.kind==="low"&&y.index>x.index);
   const retreat=after?.price??Math.min(...observed.slice(x.index+1).map(y=>y.price));
@@ -62,8 +64,8 @@ export function evaluateEntry(points: EntryPoint[], live: number, liveAt: string
   if(amplitude<ENTRY_POLICY.gross*1.1)return reject("unverified_target_room",{...metrics,amplitude});
   basis="prior_leg_projection";
  }
- // The prior completed wave sets extension when available, not a fixed 1.2%.
- if(amplitude>=ENTRY_POLICY.gross*1.1 && advance>amplitude*.35)return reject("entry_leg_already_advanced",{...metrics,amplitude});
- return {reason:"qualified",metrics,plan:{version:"entry-v6",pattern:pullback?"pullback":"breakout",target_basis:basis,observed_at:new Date(now).toISOString(),quote_at:liveAt,entry:live,min,max,target,stop,support,resistance,risk_reward:(target-max)/(max-stop),setup_at:supportAt,valid_until:new Date(now+ENTRY_POLICY.validityMinutes*60000).toISOString()}};
+ // Projection limits extension only when no observed resistance supports the target.
+ if(resistance===undefined && amplitude>=ENTRY_POLICY.gross*1.1 && advance>amplitude*.35)return reject("entry_leg_already_advanced",{...metrics,amplitude});
+ return {reason:"qualified",metrics,plan:{version:"entry-v6",pattern:pullback?"pullback":breakout?"breakout":"continuation",target_basis:basis,observed_at:new Date(now).toISOString(),quote_at:liveAt,entry:live,min,max,target,stop,support,resistance,risk_reward:(target-max)/(max-stop),setup_at:supportAt,valid_until:new Date(now+ENTRY_POLICY.validityMinutes*60000).toISOString()}};
 }
 export function entryPlan(points:EntryPoint[],live:number,liveAt:string,now:number,context?:EntryContext):EntryPlan|null {return evaluateEntry(points,live,liveAt,now,context).plan;}
