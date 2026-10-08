@@ -6,6 +6,10 @@ Version de travail du 7 octobre 2026, issue du prompt personnel « Scan 5 % ». 
 
 Repérer une crypto qui commence un mouvement exploitable, avec un objectif indicatif de 2 % net estimé. Rechercher des occasions, sans attendre une certitude parfaite et sans produire une alerte pour remplir un quota.
 
+La priorité est une entrée exploitable dès réception, suffisamment précoce, avec un potentiel restant crédible et un risque encadré. Une alerte peut échouer ; ne pas exiger une certitude parfaite ni ajouter une condition uniquement pour éliminer un cas perdant déjà observé. Évaluer chaque nouvelle règle sur les mêmes historiques en comptant aussi les occasions qu'elle fait manquer.
+
+Une hausse déjà engagée appelle de la prudence, sans exclusion automatique. Ni son heure de départ ni sa durée ne suffisent à l'écarter : juger le prix actuel, le potentiel restant et l'invalidation. Ne pas imposer un nouveau repli ou une consolidation à tout mouvement déjà haussier ; ces configurations sont des occasions possibles, pas des préalables universels.
+
 L'utilisateur décide de ses achats et ventes. Aucun achat automatique, aucune marge ou crédit, aucune taille de position prescrite et aucun renforcement automatique.
 
 ## Nouveau scan
@@ -21,6 +25,12 @@ La version de travail lit quatre heures et demie à quinze minutes pour le conte
 **1. Une nouvelle impulsion commence-t-elle ?**
 
 Chercher une sortie de consolidation, une reprise après repli, ou une nouvelle marche dans un mouvement haussier. Identifier le support et la reprise avec les données déjà connues. Ne pas attendre plusieurs confirmations obligatoires.
+
+Les mouvements commencés la nuit restent admissibles. À partir de 9 h, examiner l'historique antérieur disponible : l'ouverture de la plage d'envoi ne crée pas une nouvelle occasion. Ne pas envoyer à 9 h un signal nocturne devenu tardif.
+
+Pour situer le départ de la vague, distinguer le creux qui lance le mouvement d'un petit creux intermédiaire. Une simple respiration ne remet pas à zéro l'avancement de la hausse. Si le scénario est présenté comme une nouvelle vague après repli ou consolidation, cette structure doit être identifiable dans les observations. Une continuation déjà engagée reste examinable si le potentiel restant et l'invalidation sont cohérents depuis le prix actuel ; ne pas la présenter artificiellement comme un nouveau départ.
+
+Une tendance sur quatre heures négative apporte du contexte ; elle ne doit pas, à elle seule, interdire une nouvelle reprise locale. À l'inverse, quelques prix en hausse ne suffisent pas à démontrer que la structure baissière est réparée. Consigner les éléments observés et l'incertitude, sans attendre systématiquement un retour positif de la variation sur quatre heures.
 
 Une petite baisse peut être une respiration. Elle ne suffit pas à invalider une entrée si la reprise et le support restent cohérents. En revanche, ne pas confondre un simple rebond dans une structure qui continue de se dégrader avec une reprise constructive.
 
